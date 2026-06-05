@@ -8,7 +8,7 @@ export type DiscordRequest = Request & {
   discordInteraction?: unknown;
 };
 
-export const verifyDiscordRequest = (
+export const verifyDiscordRequest = async (
   req: DiscordRequest,
   res: Response,
   next: NextFunction,
@@ -30,7 +30,7 @@ export const verifyDiscordRequest = (
     return;
   }
 
-  const isValid = verifyKey(rawBody, signature, timestamp, env.DISCORD_PUBLIC_KEY);
+  const isValid = await verifyKey(rawBody, signature, timestamp, env.DISCORD_PUBLIC_KEY);
 
   if (!isValid) {
     res.status(401).json({ error: "Invalid Discord request signature" });
