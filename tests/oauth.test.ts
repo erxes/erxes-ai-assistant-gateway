@@ -125,7 +125,6 @@ const requestCallback = async (
       overrides.getDiscordOAuthMe ??
       (async () => ({
         user: { id: "discord-user-1" },
-        guild: { id: "guild-1", name: "Guild One" },
       })),
     getDiscordGuild:
       overrides.getDiscordGuild ??
@@ -166,11 +165,14 @@ test("OAuth callback rejects missing code", async () => {
 });
 
 test("OAuth callback rejects inaccessible guild", async () => {
-  const { response, writes } = await requestCallback("&code=code-1&permissions=8", {
-    getDiscordGuild: async () => {
-      throw new Error("403");
+  const { response, writes } = await requestCallback(
+    "&code=code-1&permissions=8&guild_id=guild-1",
+    {
+      getDiscordGuild: async () => {
+        throw new Error("403");
+      },
     },
-  });
+  );
   const redirect = response.headers.get("location");
 
   assert.equal(response.status, 302);
@@ -187,8 +189,19 @@ test("OAuth callback rejects permissions without Administrator", async () => {
   assert.ok(redirect?.includes("message=missing-administrator-permission"));
 });
 
-test("OAuth callback saves connected installation after verified admin install", async () => {
+test("OAuth callback rejects missing guild install details", async () => {
   const { response, writes } = await requestCallback("&code=code-1&permissions=8");
+  const redirect = response.headers.get("location");
+
+  assert.equal(response.status, 302);
+  assert.equal(writes.length, 0);
+  assert.ok(redirect?.includes("message=missing-discord-guild"));
+});
+
+test("OAuth callback saves connected installation after verified admin install", async () => {
+  const { response, writes } = await requestCallback(
+    "&code=code-1&permissions=8&guild_id=guild-1",
+  );
   const redirect = response.headers.get("location");
 
   assert.equal(response.status, 302);

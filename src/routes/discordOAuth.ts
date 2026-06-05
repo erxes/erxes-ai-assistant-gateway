@@ -198,7 +198,9 @@ export const createDiscordOAuthRouter = ({
         return;
       }
 
-      const guildId = oauthMe.guild?.id;
+      const guildId =
+        getQueryString(req.query.guild_id) ??
+        oauthMe.guild?.id;
 
       if (!guildId) {
         logger.warn("Discord OAuth installation details missing guild");
