@@ -20,6 +20,7 @@ type FlexibleOpenClawResponse = {
   message?: unknown;
   content?: unknown;
   response?: unknown;
+  error?: unknown;
 };
 
 const normalizeOpenClawUrl = (openclawUrl: string) =>
@@ -39,6 +40,25 @@ const parseAssistantAnswer = (body: FlexibleOpenClawResponse) => {
   }
 
   return "The assistant returned an empty response.";
+};
+
+const sanitizeRemoteMessage = (text: string) => {
+  if (!text.trim()) {
+    return "empty response body";
+  }
+
+  try {
+    const body = JSON.parse(text) as FlexibleOpenClawResponse;
+    const value = body.error ?? body.message;
+
+    if (typeof value === "string" && value.trim()) {
+      return value.trim().replace(/\s+/g, " ").slice(0, 160);
+    }
+  } catch {
+    // Fall back to the generic summary below for non-JSON bodies.
+  }
+
+  return `response body length ${text.length}`;
 };
 
 export const askOpenClawAssistant = async (input: AskAssistantInput) => {
@@ -70,7 +90,7 @@ export const askOpenClawAssistant = async (input: AskAssistantInput) => {
 
   if (!response.ok) {
     throw new Error(
-      `OpenClaw request failed with status ${response.status}: ${text}`,
+      `OpenClaw request failed with status ${response.status}: ${sanitizeRemoteMessage(text)}`,
     );
   }
 

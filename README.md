@@ -1,10 +1,10 @@
-# Erxes AI Assistant Gateway
+# erxes Ai Assistant Gateway
 
-Central Discord gateway for the official Erxes AI Assistant bot.
+Central Discord gateway for the official erxes Ai Assistant bot.
 
 ## Architecture
 
-This service uses one official Discord application and bot named `Erxes AI Assistant`.
+This service uses one official Discord application and bot named `erxes Ai Assistant`.
 
 ```text
 Discord guildId + channelId
@@ -25,8 +25,8 @@ Create the Discord application manually in the Discord Developer Portal.
 Use:
 
 ```text
-Application name: Erxes AI Assistant
-Bot name: Erxes AI Assistant
+Application name: erxes Ai Assistant
+Bot name: erxes Ai Assistant
 ```
 
 Collect:
@@ -60,7 +60,7 @@ The gateway-generated installation flow requests Discord Administrator permissio
 Administrator permission integer: 8
 ```
 
-Administrator grants the official Erxes AI Assistant bot full permissions in the selected Discord server. SaaS users do not use the Discord Developer Portal OAuth2 URL Generator directly; they use `/discord/oauth/start`, which generates the install URL with `permissions=8`.
+Administrator grants the official erxes Ai Assistant bot full permissions in the selected Discord server. SaaS users do not use the Discord Developer Portal OAuth2 URL Generator directly; they use `/discord/oauth/start`, which generates the install URL with `permissions=8`.
 
 Configure hosted URLs:
 
@@ -92,6 +92,7 @@ DISCORD_BOT_TOKEN=
 DISCORD_REDIRECT_URI=http://localhost:3001/discord/oauth/callback
 DISCORD_TEST_GUILD_ID=
 DISCORD_BOT_PERMISSIONS=8
+ENABLE_MOCK_OPENCLAW=false
 
 ERXES_GATEWAY_ADMIN_SECRET=change-me
 ERXES_ALLOWED_RETURN_URLS=http://localhost:3000
@@ -117,6 +118,7 @@ Checks:
 
 ```bash
 pnpm typecheck
+pnpm test
 pnpm build
 ```
 
@@ -143,6 +145,14 @@ If `DISCORD_TEST_GUILD_ID` is set, this registers a guild command. Otherwise it 
 ```text
 /assistant question:<text>
 ```
+
+Mock OpenClaw is disabled by default. Enable it only for local development or a short-lived deployed mock test:
+
+```env
+ENABLE_MOCK_OPENCLAW=true
+```
+
+Do not enable the mock route in production. Startup validation rejects `ENABLE_MOCK_OPENCLAW=true` when `NODE_ENV=production`.
 
 Mock OpenClaw:
 
@@ -198,7 +208,7 @@ GET /health
 GET /discord/oauth/start
 GET /discord/oauth/callback
 POST /discord/interactions
-POST /mock-openclaw/api/erxes-ai-assistant/ask
+POST /mock-openclaw/api/erxes-ai-assistant/ask  # only when ENABLE_MOCK_OPENCLAW=true
 ```
 
 Protected with `x-erxes-gateway-admin-secret`:
@@ -221,6 +231,7 @@ Implemented:
 - Discord Ed25519 request signature verification.
 - Raw request body preservation for interactions.
 - Secure expiring single-use OAuth state.
+- OAuth callback only saves connected installations after OAuth code exchange succeeds, Discord returns the installed guild, the bot can fetch the guild, and returned permissions include Administrator.
 - Erxes return URL allowlist.
 - Protected internal APIs with `x-erxes-gateway-admin-secret`.
 - No privileged Discord intents for MVP.
@@ -232,6 +243,7 @@ Implemented:
 - Optional `x-erxes-ai-assistant-secret` forwarding.
 - Tenant/guild installation validation before binding writes.
 - One active binding per Discord guild/channel.
+- Production startup rejects placeholder gateway admin secrets and refuses to enable the mock OpenClaw route.
 
 TODO: replace the shared gateway admin secret with stronger service authentication, signed requests, and audit logging.
 
@@ -260,6 +272,7 @@ git clone <repo-url> /opt/erxes-ai-assistant-gateway
 cd /opt/erxes-ai-assistant-gateway
 cp .env.example .env
 pnpm install
+pnpm test
 pnpm build
 pm2 start dist/src/main.js --name erxes-ai-assistant-gateway
 pm2 save
@@ -329,7 +342,7 @@ Rollback by deploying the previous git revision, running `pnpm install && pnpm b
 
 ## End-To-End MVP Test
 
-1. Create one official Discord application and bot named `Erxes AI Assistant`.
+1. Create one official Discord application and bot named `erxes Ai Assistant`.
 2. Configure this gateway with the official Discord credentials.
 3. Register `/assistant question:<text>`.
 4. Start Erxes with `ERXES_AI_ASSISTANT_GATEWAY_URL` and `ERXES_AI_ASSISTANT_GATEWAY_SECRET`.

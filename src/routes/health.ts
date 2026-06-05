@@ -1,15 +1,19 @@
 import { Router } from "express";
 
+import { env } from "../config/env.js";
 import { mongoHealth } from "../db/mongo.js";
 
 export const healthRouter = Router();
 
 healthRouter.get("/", (_req, res) => {
-  res.json({
-    ok: true,
+  const mongo = mongoHealth();
+  const ok = mongo.readyState === 1;
+  const statusCode = env.NODE_ENV === "production" && !ok ? 503 : 200;
+
+  res.status(statusCode).json({
+    ok,
     service: "erxes-ai-assistant-gateway",
     uptime: Math.floor(process.uptime()),
-    mongo: mongoHealth(),
+    mongo,
   });
 });
-

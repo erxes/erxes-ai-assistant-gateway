@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Central Discord gateway for Erxes AI Assistant installations.",
+  "description": "Central Discord gateway for erxes Ai Assistant installations.",
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/src/main.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx --test tests/**/*.test.ts",
     "register:commands": "tsx scripts/register-commands.ts"
   },
   "engines": {

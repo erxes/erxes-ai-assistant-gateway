@@ -34,6 +34,7 @@ export const env = {
   DISCORD_TEST_GUILD_ID: process.env.DISCORD_TEST_GUILD_ID ?? "",
   DISCORD_BOT_PERMISSIONS:
     process.env.DISCORD_BOT_PERMISSIONS ?? defaultBotPermissions,
+  ENABLE_MOCK_OPENCLAW: process.env.ENABLE_MOCK_OPENCLAW ?? "false",
   ERXES_ALLOWED_RETURN_URLS:
     process.env.ERXES_ALLOWED_RETURN_URLS ?? "http://localhost:3000",
   OPENCLAW_REQUEST_TIMEOUT_MS: toNumber(
@@ -70,6 +71,20 @@ const requiredStartupEnv: Array<keyof typeof env> = [
   "ERXES_GATEWAY_ADMIN_SECRET",
 ];
 
+const placeholderSecrets = new Set([
+  "change-me",
+  "changeme",
+  "secret",
+  "password",
+  "token",
+  "admin-secret",
+]);
+
+const isProduction = () => env.NODE_ENV === "production";
+
+const isStrongProductionSecret = (value: string) =>
+  value.length >= 32 && !placeholderSecrets.has(value.trim().toLowerCase());
+
 export const validateEnv = () => {
   const missing = requiredStartupEnv.filter((name) => {
     const value = env[name];
@@ -86,5 +101,21 @@ export const validateEnv = () => {
     throw new Error(
       "Invalid DISCORD_BOT_PERMISSIONS: expected a decimal non-negative integer string",
     );
+  }
+
+  if (env.ENABLE_MOCK_OPENCLAW !== "true" && env.ENABLE_MOCK_OPENCLAW !== "false") {
+    throw new Error("Invalid ENABLE_MOCK_OPENCLAW: expected true or false");
+  }
+
+  if (isProduction()) {
+    if (!isStrongProductionSecret(env.ERXES_GATEWAY_ADMIN_SECRET)) {
+      throw new Error(
+        "Invalid ERXES_GATEWAY_ADMIN_SECRET: production requires a strong non-placeholder secret of at least 32 characters",
+      );
+    }
+
+    if (env.ENABLE_MOCK_OPENCLAW === "true") {
+      throw new Error("ENABLE_MOCK_OPENCLAW cannot be true in production");
+    }
   }
 };
