@@ -60,6 +60,7 @@ test("OAuth install URL contains required Discord install parameters", () => {
   assert.deepEqual([...discordOAuthScopes], ["bot", "applications.commands"]);
   assert.equal(url.searchParams.get("scope"), "bot applications.commands");
   assert.equal(url.searchParams.get("permissions"), "8");
+  assert.equal(url.searchParams.get("integration_type"), "0");
   assert.equal(
     url.searchParams.get("redirect_uri"),
     "http://localhost:3001/discord/oauth/callback",

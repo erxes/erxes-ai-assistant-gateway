@@ -11,6 +11,8 @@ export const buildDiscordInstallUrl = (state: string) => {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", discordOAuthScopes.join(" "));
   url.searchParams.set("permissions", env.DISCORD_BOT_PERMISSIONS);
+  // Explicitly install the app into a Discord server.
+  url.searchParams.set("integration_type", "0");
   url.searchParams.set("state", state);
 
   return url.toString();
