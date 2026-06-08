@@ -52,21 +52,19 @@ test("invalid Discord permission strings fail validation", () => {
   assert.throws(() => validateEnv(), /Invalid DISCORD_BOT_PERMISSIONS/);
 });
 
-test("OAuth install URL contains Administrator permissions", () => {
-  withValidEnv();
-
-  const url = new URL(buildDiscordInstallUrl("state-1"));
-
-  assert.equal(url.searchParams.get("permissions"), "8");
-});
-
-test("OAuth scopes are exactly bot and applications.commands", () => {
+test("OAuth install URL contains required Discord install parameters", () => {
   withValidEnv();
 
   const url = new URL(buildDiscordInstallUrl("state-1"));
 
   assert.deepEqual([...discordOAuthScopes], ["bot", "applications.commands"]);
   assert.equal(url.searchParams.get("scope"), "bot applications.commands");
+  assert.equal(url.searchParams.get("permissions"), "8");
+  assert.equal(
+    url.searchParams.get("redirect_uri"),
+    "http://localhost:3001/discord/oauth/callback",
+  );
+  assert.equal(url.searchParams.get("state"), "state-1");
 });
 
 test("return URL allowlist accepts matching origin and path only", () => {
