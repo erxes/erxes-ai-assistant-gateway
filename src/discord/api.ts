@@ -1,5 +1,41 @@
 import { env, requireEnv } from "../config/env.js";
-import { badRequest, forbidden, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, notFound, rateLimit } from "../lib/errors.js";
+
+const DISCORD_RATE_LIMIT_MESSAGE =
+  "Discord is rate limiting requests. Please wait a moment and try again.";
+
+const parseRetryAfterSeconds = (
+  payload: unknown,
+  headerValue: string | null,
+) => {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "retry_after" in payload &&
+    typeof payload.retry_after === "number" &&
+    Number.isFinite(payload.retry_after)
+  ) {
+    return Math.max(0, payload.retry_after);
+  }
+
+  if (!headerValue) {
+    return undefined;
+  }
+
+  const numericValue = Number(headerValue);
+
+  if (Number.isFinite(numericValue)) {
+    return Math.max(0, numericValue);
+  }
+
+  const dateValue = Date.parse(headerValue);
+
+  if (Number.isFinite(dateValue)) {
+    return Math.max(0, (dateValue - Date.now()) / 1000);
+  }
+
+  return undefined;
+};
 
 export const discordApiBaseUrl = "https://discord.com/api/v10";
 
@@ -58,6 +94,18 @@ export const discordFetch = async <T>(
 
   if (response.status === 404) {
     throw notFound("Discord guild, channel, or installation was not found");
+  }
+
+  if (response.status === 429) {
+    const retryAfter = parseRetryAfterSeconds(
+      payload,
+      response.headers.get("Retry-After"),
+    );
+
+    throw rateLimit(DISCORD_RATE_LIMIT_MESSAGE, {
+      code: "DISCORD_RATE_LIMITED",
+      retryAfter,
+    });
   }
 
   if (!response.ok) {
