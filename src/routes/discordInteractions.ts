@@ -13,6 +13,8 @@ import { askOpenClawAssistant } from "../openclaw/client.js";
 import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
 import { logger } from "../lib/logger.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { env } from "../config/env.js";
+import { splitDiscordMessage } from "../discord/messageGateway.js";
 
 export const discordInteractionsRouter = Router();
 
@@ -111,7 +113,10 @@ discordInteractionsRouter.post(
       await editOriginalInteractionResponse({
         applicationId: interaction.application_id,
         interactionToken: interaction.token,
-        content: answer,
+        content: splitDiscordMessage(
+          answer,
+          env.ERXES_ASSISTANT_REPLY_MAX_CHARS,
+        )[0] ?? "The assistant returned an empty response.",
       });
     } catch (error) {
       logger.error("Failed to answer Discord interaction", {

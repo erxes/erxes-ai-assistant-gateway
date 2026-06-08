@@ -12,6 +12,17 @@ type AskAssistantInput = {
   discord: {
     guildId: string;
     channelId: string;
+    messageId?: string;
+    userId?: string;
+    username?: string;
+    conversationId?: string;
+    attachments?: Array<{
+      id: string;
+      filename: string;
+      contentType?: string | null;
+      size: number;
+      url: string;
+    }>;
   };
 };
 
@@ -31,10 +42,6 @@ const parseAssistantAnswer = (body: FlexibleOpenClawResponse) => {
 
   if (typeof value === "string" && value.trim().length > 0) {
     const answer = value.trim();
-
-    if (answer.length > env.ERXES_ASSISTANT_REPLY_MAX_CHARS) {
-      return `${answer.slice(0, env.ERXES_ASSISTANT_REPLY_MAX_CHARS - 20)}\n\n[truncated]`;
-    }
 
     return answer;
   }

@@ -1,5 +1,13 @@
 import { model, Schema, type InferSchemaType } from "mongoose";
 
+export const discordAssistantResponseModes = [
+  "slash_only",
+  "all_messages",
+] as const;
+
+export type DiscordAssistantResponseMode =
+  (typeof discordAssistantResponseModes)[number];
+
 const discordAssistantBindingSchema = new Schema(
   {
     tenantId: { type: String, required: true, trim: true },
@@ -9,6 +17,12 @@ const discordAssistantBindingSchema = new Schema(
     discordChannelId: { type: String, required: true, trim: true },
     openclawUrl: { type: String, required: true, trim: true },
     enabled: { type: Boolean, required: true, default: true },
+    responseMode: {
+      type: String,
+      enum: discordAssistantResponseModes,
+      required: true,
+      default: "slash_only",
+    },
   },
   { timestamps: true },
 );

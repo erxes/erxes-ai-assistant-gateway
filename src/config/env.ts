@@ -47,6 +47,8 @@ export const env = {
     1800,
   ),
   OPENCLAW_SHARED_SECRET: process.env.OPENCLAW_SHARED_SECRET ?? "",
+  DISCORD_MESSAGE_GATEWAY_ENABLED:
+    process.env.DISCORD_MESSAGE_GATEWAY_ENABLED ?? "false",
 };
 
 export const requireEnv = (name: keyof typeof env): string => {
@@ -105,6 +107,15 @@ export const validateEnv = () => {
 
   if (env.ENABLE_MOCK_OPENCLAW !== "true" && env.ENABLE_MOCK_OPENCLAW !== "false") {
     throw new Error("Invalid ENABLE_MOCK_OPENCLAW: expected true or false");
+  }
+
+  if (
+    env.DISCORD_MESSAGE_GATEWAY_ENABLED !== "true" &&
+    env.DISCORD_MESSAGE_GATEWAY_ENABLED !== "false"
+  ) {
+    throw new Error(
+      "Invalid DISCORD_MESSAGE_GATEWAY_ENABLED: expected true or false",
+    );
   }
 
   if (isProduction()) {

@@ -3,7 +3,11 @@ import mongoose from "mongoose";
 
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
-import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
+import {
+  DiscordAssistantBinding,
+  discordAssistantResponseModes,
+  type DiscordAssistantResponseMode,
+} from "../models/DiscordAssistantBinding.js";
 import { DiscordInstallation } from "../models/DiscordInstallation.js";
 import { requireAdminSecret } from "./adminAuth.js";
 
@@ -33,6 +37,25 @@ const optionalString = (body: Record<string, unknown>, field: string) => {
   return value.trim();
 };
 
+const parseResponseMode = (
+  value: unknown,
+): DiscordAssistantResponseMode | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (
+    typeof value !== "string" ||
+    !discordAssistantResponseModes.includes(
+      value as DiscordAssistantResponseMode,
+    )
+  ) {
+    throw badRequest("responseMode must be slash_only or all_messages");
+  }
+
+  return value as DiscordAssistantResponseMode;
+};
+
 const parseCreateBindingBody = (body: unknown) => {
   if (!body || typeof body !== "object") {
     throw badRequest("Request body must be an object");
@@ -49,6 +72,7 @@ const parseCreateBindingBody = (body: unknown) => {
     discordChannelId: requiredString(data, "discordChannelId"),
     openclawUrl: requiredString(data, "openclawUrl"),
     enabled: typeof data.enabled === "boolean" ? data.enabled : true,
+    responseMode: parseResponseMode(data.responseMode) ?? "slash_only",
   };
 };
 
@@ -145,6 +169,7 @@ adminBindingsRouter.post(
           discordChannelId: input.discordChannelId,
           openclawUrl: input.openclawUrl,
           enabled: input.enabled,
+          responseMode: input.responseMode,
         },
       },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
@@ -231,6 +256,12 @@ adminBindingsRouter.patch(
       }
 
       update.enabled = data.enabled;
+    }
+
+    const responseMode = parseResponseMode(data.responseMode);
+
+    if (responseMode) {
+      update.responseMode = responseMode;
     }
 
     const currentBinding = await DiscordAssistantBinding.findById(req.params.id);
