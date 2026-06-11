@@ -8,13 +8,25 @@ import {
   InteractionType,
   type DiscordInteraction,
 } from "../discord/interactions.js";
-import { editOriginalInteractionResponse } from "../discord/respond.js";
-import { askOpenClawAssistant } from "../openclaw/client.js";
+import {
+  createFollowupMessage,
+  editOriginalInteractionResponse,
+} from "../discord/respond.js";
+import { launchDiscordLongOperationJob } from "../discord/longJobLauncher.js";
+import { detectLongRunningOperation } from "../discord/longOps.js";
+import {
+  askOpenClawAssistant,
+  downloadRuntimeGeneratedFile,
+} from "../openclaw/client.js";
 import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
 import { logger } from "../lib/logger.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { env } from "../config/env.js";
-import { splitDiscordMessage } from "../discord/messageGateway.js";
+import {
+  buildDiscordConversationId,
+  buildRuntimeFilePayloads,
+  splitDiscordMessage,
+} from "../discord/messageGateway.js";
 
 export const discordInteractionsRouter = Router();
 
@@ -74,9 +86,21 @@ discordInteractionsRouter.post(
       return;
     }
 
+    const DISCORD_THREAD_CHANNEL_TYPES = new Set([10, 11, 12]);
+    const interactionChannel = interaction.channel;
+    const isThread =
+      interactionChannel?.type !== undefined &&
+      DISCORD_THREAD_CHANNEL_TYPES.has(interactionChannel.type) &&
+      Boolean(interactionChannel.parent_id);
+    const bindingChannelId =
+      isThread && interactionChannel?.parent_id
+        ? interactionChannel.parent_id
+        : channelId;
+    const threadId = isThread ? channelId : undefined;
+
     const binding = await DiscordAssistantBinding.findOne({
       discordGuildId: guildId,
-      discordChannelId: channelId,
+      discordChannelId: bindingChannelId,
       enabled: true,
     });
 
@@ -96,9 +120,78 @@ discordInteractionsRouter.post(
     });
 
     const user = getDiscordUser(interaction);
+    const opType = detectLongRunningOperation(question);
+
+    if (opType) {
+      const conversationId = buildDiscordConversationId({
+        guildId,
+        channelId: bindingChannelId,
+        threadId,
+      });
+
+      await editOriginalInteractionResponse({
+        applicationId: interaction.application_id,
+        interactionToken: interaction.token,
+        content: "Started. I'll post progress here.",
+      }).catch(() => undefined);
+
+      void launchDiscordLongOperationJob({
+        opType,
+        ask: {
+          openclawUrl: binding.openclawUrl,
+          tenantId: binding.tenantId,
+          assistantId: binding.assistantId,
+          question,
+          user,
+          discord: {
+            guildId,
+            channelId: bindingChannelId,
+            guildName: interaction.guild?.name,
+            channelName: isThread ? undefined : interactionChannel?.name,
+            threadId,
+            threadName: isThread ? interactionChannel?.name : undefined,
+            userId: user.id,
+            username: user.username,
+            responseMode: binding.responseMode,
+            conversationId,
+          },
+        },
+        messageId: interaction.id,
+        conversationId,
+        guildId,
+        channelId: bindingChannelId,
+        threadId,
+        skipAck: true,
+        // Interaction tokens expire after 15 minutes; stop polling before that.
+        timeoutMs: Math.min(env.ASSISTANT_JOB_TIMEOUT_MS, 13 * 60_000),
+        ack: async () => undefined,
+        notify: (content: string) =>
+          createFollowupMessage({
+            applicationId: interaction.application_id,
+            interactionToken: interaction.token,
+            content,
+          }),
+        sendFiles: (caption, files) =>
+          createFollowupMessage({
+            applicationId: interaction.application_id,
+            interactionToken: interaction.token,
+            content: caption,
+            files,
+          }),
+      }).catch((error) => {
+        logger.error("Discord slash long operation job failed to start", {
+          interactionId: interaction.id,
+          guildId,
+          channelId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+      return;
+    }
 
     try {
-      const answer = await askOpenClawAssistant({
+      const result = await askOpenClawAssistant({
         openclawUrl: binding.openclawUrl,
         tenantId: binding.tenantId,
         assistantId: binding.assistantId,
@@ -106,7 +199,19 @@ discordInteractionsRouter.post(
         user,
         discord: {
           guildId,
-          channelId,
+          channelId: bindingChannelId,
+          guildName: interaction.guild?.name,
+          channelName: isThread ? undefined : interactionChannel?.name,
+          threadId,
+          threadName: isThread ? interactionChannel?.name : undefined,
+          userId: user.id,
+          username: user.username,
+          responseMode: binding.responseMode,
+          conversationId: buildDiscordConversationId({
+            guildId,
+            channelId: bindingChannelId,
+            threadId,
+          }),
         },
       });
 
@@ -114,10 +219,35 @@ discordInteractionsRouter.post(
         applicationId: interaction.application_id,
         interactionToken: interaction.token,
         content: splitDiscordMessage(
-          answer,
+          result.answer,
           env.ERXES_ASSISTANT_REPLY_MAX_CHARS,
         )[0] ?? "The assistant returned an empty response.",
       });
+
+      if (result.files.length > 0) {
+        const { payloads, failed } = await buildRuntimeFilePayloads(
+          binding.openclawUrl,
+          result.files,
+          downloadRuntimeGeneratedFile,
+        );
+
+        if (payloads.length > 0) {
+          await createFollowupMessage({
+            applicationId: interaction.application_id,
+            interactionToken: interaction.token,
+            content: "Here is the generated file.",
+            files: payloads,
+          }).catch(() => undefined);
+        }
+
+        if (failed.length > 0 || payloads.length === 0) {
+          await createFollowupMessage({
+            applicationId: interaction.application_id,
+            interactionToken: interaction.token,
+            content: "I created the file, but couldn't upload it to Discord.",
+          }).catch(() => undefined);
+        }
+      }
     } catch (error) {
       logger.error("Failed to answer Discord interaction", {
         interactionId: interaction.id,

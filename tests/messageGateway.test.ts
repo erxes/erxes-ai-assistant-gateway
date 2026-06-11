@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { MessageType } from "discord.js";
 
 import {
+  buildDiscordConversationId,
   createTtlMessageCache,
   handleDiscordMessage,
   shouldIgnoreDiscordMessage,
@@ -153,12 +154,24 @@ test("webhook messages are ignored", () => {
   );
 });
 
-test("attachment-only messages are ignored until attachment content is supported", () => {
+test("attachment-only messages are no longer ignored", () => {
   assert.equal(
     shouldIgnoreDiscordMessage(
       createMessage({
         content: "",
         attachments: { size: 1 },
+      }).message,
+    ),
+    false,
+  );
+});
+
+test("empty messages without attachments are still ignored", () => {
+  assert.equal(
+    shouldIgnoreDiscordMessage(
+      createMessage({
+        content: "   ",
+        attachments: { size: 0 },
       }).message,
     ),
     true,
@@ -216,4 +229,79 @@ test("long replies are split safely", async () => {
 test("existing slash command mode remains represented by slash_only default", () => {
   const binding = createBinding({ responseMode: undefined });
   assert.equal(binding.responseMode ?? "slash_only", "slash_only");
+});
+
+test("thread messages resolve the parent channel binding and a thread conversation id", async () => {
+  const fixture = createMessage({
+    channelId: "thread-1",
+    channel: {
+      isThread: () => true,
+      parentId: "channel-1",
+      name: "deal-discussion",
+      parent: { name: "sales" },
+      sendTyping: async () => undefined,
+      send: async () => undefined,
+    },
+  });
+  const lookups: Array<{ guildId: string; channelId: string }> = [];
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async (input) => {
+      lookups.push(input);
+      return input.channelId === "channel-1" ? createBinding() : null;
+    },
+    askAssistant: async (input) => {
+      assert.equal(input.discord.channelId, "channel-1");
+      assert.equal(input.discord.threadId, "thread-1");
+      assert.equal(input.discord.threadName, "deal-discussion");
+      assert.equal(input.discord.channelName, "sales");
+      assert.equal(
+        input.discord.conversationId,
+        "discord:guild-1:channel-1:thread-1",
+      );
+      return "thread reply";
+    },
+  });
+
+  assert.deepEqual(lookups, [{ guildId: "guild-1", channelId: "channel-1" }]);
+  assert.equal(fixture.replies.length, 1);
+});
+
+test("discord context metadata is forwarded to the assistant", async () => {
+  const fixture = createMessage({
+    guild: { name: "Office Next" },
+    member: { displayName: "MJ" },
+    channel: {
+      name: "sales",
+      sendTyping: async () => undefined,
+      send: async () => undefined,
+    },
+  });
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => createBinding(),
+    askAssistant: async (input) => {
+      assert.equal(input.discord.guildName, "Office Next");
+      assert.equal(input.discord.channelName, "sales");
+      assert.equal(input.discord.authorDisplayName, "MJ");
+      assert.equal(input.discord.responseMode, "all_messages");
+      assert.equal(input.discord.threadId, undefined);
+      return "ok";
+    },
+  });
+
+  assert.equal(fixture.replies.length, 1);
+});
+
+test("buildDiscordConversationId is stable for channels and threads", () => {
+  assert.equal(
+    buildDiscordConversationId({ guildId: "g", channelId: "c" }),
+    "discord:g:c",
+  );
+  assert.equal(
+    buildDiscordConversationId({ guildId: "g", channelId: "c", threadId: "t" }),
+    "discord:g:c:t",
+  );
 });

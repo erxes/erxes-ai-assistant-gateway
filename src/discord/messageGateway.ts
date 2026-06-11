@@ -13,19 +13,42 @@ import {
   DiscordAssistantBinding,
   type DiscordAssistantBindingDocument,
 } from "../models/DiscordAssistantBinding.js";
-import { askOpenClawAssistant } from "../openclaw/client.js";
+import {
+  askOpenClawAssistant,
+  downloadRuntimeGeneratedFile,
+  type RuntimeGeneratedFile,
+} from "../openclaw/client.js";
+import {
+  launchDiscordLongOperationJob,
+  resumeStaleAssistantJobs,
+} from "./longJobLauncher.js";
+import { detectLongRunningOperation } from "./longOps.js";
 
-type AttachmentMetadata = {
-  id: string;
-  filename: string;
-  contentType?: string | null;
-  size: number;
-  url: string;
-};
+import {
+  attachmentRejectionMessage,
+  normalizeDiscordAttachments,
+  skippedAttachmentsNote,
+  type RawDiscordAttachment,
+} from "./attachments.js";
 
 type MessageGatewayStatus = {
   enabled: boolean;
   connected: boolean;
+};
+
+export type LongOperationJobRequest = {
+  opType: string;
+  ask: Parameters<typeof askOpenClawAssistant>[0];
+  messageId: string;
+  conversationId: string;
+  guildId: string;
+  channelId: string;
+  threadId?: string;
+  ack: (content: string) => Promise<unknown>;
+  notify: (content: string) => Promise<unknown>;
+  sendFiles?: (caption: string, files: DiscordFilePayload[]) => Promise<unknown>;
+  timeoutMs?: number;
+  skipAck?: boolean;
 };
 
 type MessageGatewayDeps = {
@@ -35,6 +58,33 @@ type MessageGatewayDeps = {
   }) => Promise<DiscordAssistantBindingDocument | null>;
   askAssistant: typeof askOpenClawAssistant;
   logger: typeof logger;
+  runLongOperationJob?: (request: LongOperationJobRequest) => Promise<unknown>;
+  fetchRuntimeFile?: typeof downloadRuntimeGeneratedFile;
+};
+
+export const buildRuntimeFilePayloads = async (
+  openclawUrl: string,
+  files: RuntimeGeneratedFile[],
+  fetchRuntimeFile: typeof downloadRuntimeGeneratedFile,
+): Promise<{ payloads: DiscordFilePayload[]; failed: string[] }> => {
+  const payloads: DiscordFilePayload[] = [];
+  const failed: string[] = [];
+
+  for (const file of files.slice(0, 5)) {
+    try {
+      const bytes = await fetchRuntimeFile(openclawUrl, file.fileId);
+      payloads.push({ attachment: bytes, name: file.filename });
+    } catch {
+      failed.push(file.filename);
+    }
+  }
+
+  return { payloads, failed };
+};
+
+export type DiscordFilePayload = {
+  attachment: Buffer;
+  name: string;
 };
 
 type SendableDiscordChannel = {
@@ -42,13 +92,56 @@ type SendableDiscordChannel = {
   send: (payload: {
     content: string;
     allowedMentions: { repliedUser: false };
+    files?: DiscordFilePayload[];
   }) => Promise<unknown>;
+  isThread?: () => boolean;
+  parentId?: string | null;
+  name?: string | null;
+  parent?: { name?: string | null } | null;
 };
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const DEFAULT_REPLY_CHUNK_LIMIT = 1900;
 const PROCESSED_MESSAGE_TTL_MS = 5 * 60 * 1000;
 const PROCESSED_MESSAGE_MAX_SIZE = 5000;
+const TYPING_REFRESH_INTERVAL_MS = 8000;
+
+export const buildDiscordConversationId = (input: {
+  guildId: string;
+  channelId: string;
+  threadId?: string;
+}) =>
+  [
+    "discord",
+    input.guildId,
+    input.channelId,
+    ...(input.threadId ? [input.threadId] : []),
+  ].join(":");
+
+export const resolveDiscordMessageTarget = (message: {
+  channelId: string;
+  channel?: unknown;
+}) => {
+  const channel = (message.channel ?? {}) as SendableDiscordChannel;
+  const isThread =
+    typeof channel.isThread === "function" && Boolean(channel.isThread());
+
+  if (isThread && channel.parentId) {
+    return {
+      bindingChannelId: channel.parentId,
+      threadId: message.channelId,
+      threadName: channel.name ?? undefined,
+      channelName: channel.parent?.name ?? undefined,
+    };
+  }
+
+  return {
+    bindingChannelId: message.channelId,
+    threadId: undefined,
+    threadName: undefined,
+    channelName: channel.name ?? undefined,
+  };
+};
 
 const status: MessageGatewayStatus = {
   enabled: env.DISCORD_MESSAGE_GATEWAY_ENABLED === "true",
@@ -171,16 +264,15 @@ export const shouldIgnoreDiscordMessage = (
     return true;
   }
 
-  if (!message.content.trim()) {
+  if (!message.content.trim() && !(message.attachments?.size ?? 0)) {
     return true;
   }
 
   return false;
 };
 
-const getAttachmentMetadata = (message: Message): AttachmentMetadata[] =>
+const getRawAttachments = (message: Message): RawDiscordAttachment[] =>
   message.attachments.map((attachment) => ({
-    id: attachment.id,
     filename: attachment.name,
     contentType: attachment.contentType,
     size: attachment.size,
@@ -198,7 +290,11 @@ export const handleDiscordMessage = async (
     return;
   }
 
-  const binding = await deps.findBinding({ guildId, channelId });
+  const target = resolveDiscordMessageTarget(message);
+  const binding = await deps.findBinding({
+    guildId,
+    channelId: target.bindingChannelId,
+  });
 
   if (!binding) {
     return;
@@ -220,30 +316,143 @@ export const handleDiscordMessage = async (
     return;
   }
 
+  const conversationId = buildDiscordConversationId({
+    guildId,
+    channelId: target.bindingChannelId,
+    threadId: target.threadId,
+  });
+
+  const { supported: attachments, skipped } = normalizeDiscordAttachments(
+    getRawAttachments(message),
+  );
+  const question = message.content.trim();
+
+  if (!question && attachments.length === 0) {
+    if (skipped.length > 0) {
+      await channel
+        .send?.({
+          content: attachmentRejectionMessage(skipped),
+          allowedMentions: { repliedUser: false },
+        })
+        .catch(() => undefined);
+    }
+    return;
+  }
+
+  if (attachments.length > 0 || skipped.length > 0) {
+    deps.logger.info("Discord attachments received", {
+      guildId,
+      channelId,
+      messageId: message.id,
+      assistantId: binding.assistantId,
+      attachmentCount: attachments.length + skipped.length,
+      supportedCount: attachments.length,
+      skippedCount: skipped.length,
+      contentTypes: attachments.map((item) => item.contentType),
+      totalBytes: attachments.reduce((sum, item) => sum + item.size, 0),
+    });
+  }
+
+  const askInput = {
+    openclawUrl: binding.openclawUrl,
+    tenantId: binding.tenantId,
+    assistantId: binding.assistantId,
+    question,
+    user: {
+      id: message.author.id,
+      username: message.author.username,
+    },
+    discord: {
+      guildId,
+      channelId: target.bindingChannelId,
+      guildName: message.guild?.name ?? undefined,
+      channelName: target.channelName,
+      threadId: target.threadId,
+      threadName: target.threadName,
+      messageId: message.id,
+      userId: message.author.id,
+      username: message.author.username,
+      authorDisplayName: message.member?.displayName ?? undefined,
+      responseMode: binding.responseMode,
+      conversationId,
+      attachments,
+    },
+  };
+
+  const skippedNote =
+    skipped.length > 0 ? skippedAttachmentsNote(skipped) : null;
+
+  const sendSkippedNote = async () => {
+    if (skippedNote) {
+      await channel
+        .send?.({
+          content: skippedNote,
+          allowedMentions: { repliedUser: false },
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const detectedOpType = detectLongRunningOperation(message.content);
+  const hasFileAttachment = attachments.some((item) => item.kind === "file");
+  const opType =
+    detectedOpType ?? (hasFileAttachment ? "file-processing" : null);
+
+  if (opType && deps.runLongOperationJob) {
+    void deps
+      .runLongOperationJob({
+        opType,
+        ask: askInput,
+        messageId: message.id,
+        conversationId,
+        guildId,
+        channelId: target.bindingChannelId,
+        threadId: target.threadId,
+        ack: (content: string) =>
+          message.reply({ content, allowedMentions: { repliedUser: false } }),
+        notify: (content: string) =>
+          channel.send!({ content, allowedMentions: { repliedUser: false } }),
+        sendFiles: (caption: string, files: DiscordFilePayload[]) =>
+          channel.send!({
+            content: caption,
+            allowedMentions: { repliedUser: false },
+            files,
+          }),
+      })
+      .catch((error) => {
+        deps.logger.error("Discord long operation job failed to start", {
+          guildId,
+          channelId,
+          messageId: message.id,
+          assistantId: binding.assistantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    await sendSkippedNote();
+    return;
+  }
+
+  let typingRefresh: ReturnType<typeof setInterval> | undefined;
+
   try {
     await channel.sendTyping();
+    typingRefresh = setInterval(() => {
+      void channel.sendTyping?.().catch(() => undefined);
+    }, TYPING_REFRESH_INTERVAL_MS);
 
-    const answer = await deps.askAssistant({
-      openclawUrl: binding.openclawUrl,
-      tenantId: binding.tenantId,
-      assistantId: binding.assistantId,
-      question: message.content.trim(),
-      user: {
-        id: message.author.id,
-        username: message.author.username,
-      },
-      discord: {
-        guildId,
-        channelId,
-        messageId: message.id,
-        userId: message.author.id,
-        username: message.author.username,
-        conversationId: `discord:${guildId}:${channelId}`,
-        attachments: getAttachmentMetadata(message),
-      },
-    });
+    const result = await deps.askAssistant(askInput);
+    const askResult =
+      typeof result === "string"
+        ? { answer: result, files: [], fileErrors: [] }
+        : {
+            answer: result.answer,
+            files: result.files ?? [],
+            fileErrors: result.fileErrors ?? [],
+          };
 
-    const [firstChunk, ...remainingChunks] = splitDiscordMessage(answer);
+    const [firstChunk, ...remainingChunks] = splitDiscordMessage(
+      askResult.answer,
+    );
 
     await message.reply({
       content: firstChunk,
@@ -256,6 +465,63 @@ export const handleDiscordMessage = async (
         allowedMentions: { repliedUser: false },
       });
     }
+
+    if (askResult.files.length > 0) {
+      const fetchRuntimeFile =
+        deps.fetchRuntimeFile ?? downloadRuntimeGeneratedFile;
+      const { payloads, failed } = await buildRuntimeFilePayloads(
+        binding.openclawUrl,
+        askResult.files,
+        fetchRuntimeFile,
+      );
+
+      if (payloads.length > 0) {
+        await channel
+          .send({
+            content: "Here is the generated file.",
+            allowedMentions: { repliedUser: false },
+            files: payloads,
+          })
+          .catch(async () => {
+            await channel.send?.({
+              content: "I created the file, but couldn't upload it to Discord.",
+              allowedMentions: { repliedUser: false },
+            });
+          });
+      }
+
+      if (failed.length > 0 || payloads.length === 0) {
+        await channel
+          .send?.({
+            content: "I created the file, but couldn't upload it to Discord.",
+            allowedMentions: { repliedUser: false },
+          })
+          .catch(() => undefined);
+      }
+
+      deps.logger.info("Discord generated files delivered", {
+        guildId,
+        channelId,
+        messageId: message.id,
+        assistantId: binding.assistantId,
+        fileCount: askResult.files.length,
+        uploadedCount: payloads.length,
+        failedCount: failed.length,
+        contentTypes: askResult.files.map((file) => file.contentType),
+        totalBytes: askResult.files.reduce((sum, file) => sum + file.size, 0),
+      });
+    }
+
+    if (askResult.fileErrors.length > 0) {
+      await channel
+        .send?.({
+          content: `Note: some generated files couldn't be prepared: ${askResult.fileErrors.join("; ")}`,
+          allowedMentions: { repliedUser: false },
+        })
+        .catch(() => undefined);
+    }
+
+    await sendSkippedNote();
   } catch (error) {
     deps.logger.error("Discord message handling failed", {
       guildId,
@@ -282,6 +548,10 @@ export const handleDiscordMessage = async (
               : String(replyError),
         });
       });
+  } finally {
+    if (typingRefresh) {
+      clearInterval(typingRefresh);
+    }
   }
 };
 
@@ -310,6 +580,12 @@ export const startDiscordMessageGateway = async () => {
   client.once(Events.ClientReady, () => {
     status.connected = true;
     logger.info("Discord message gateway connected");
+
+    void resumeStaleAssistantJobs(client).catch((error) => {
+      logger.error("Failed to resume assistant jobs after restart", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   });
 
   client.on(Events.ShardDisconnect, (event) => {
@@ -348,6 +624,7 @@ export const startDiscordMessageGateway = async () => {
       handleDiscordMessage(message, {
         logger,
         askAssistant: askOpenClawAssistant,
+        runLongOperationJob: launchDiscordLongOperationJob,
         findBinding: ({ guildId: nextGuildId, channelId: nextChannelId }) =>
           DiscordAssistantBinding.findOne({
             discordGuildId: nextGuildId,

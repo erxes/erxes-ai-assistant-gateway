@@ -5,6 +5,16 @@ export type DiscordInteraction = {
   type: number;
   guild_id?: string;
   channel_id?: string;
+  channel?: {
+    id?: string;
+    name?: string;
+    type?: number;
+    parent_id?: string | null;
+  };
+  guild?: {
+    id?: string;
+    name?: string;
+  };
   member?: {
     user?: {
       id: string;

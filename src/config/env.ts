@@ -47,6 +47,14 @@ export const env = {
     1800,
   ),
   OPENCLAW_SHARED_SECRET: process.env.OPENCLAW_SHARED_SECRET ?? "",
+  ASSISTANT_JOB_POLL_INTERVAL_MS: toNumber(
+    process.env.ASSISTANT_JOB_POLL_INTERVAL_MS,
+    5_000,
+  ),
+  ASSISTANT_JOB_TIMEOUT_MS: toNumber(
+    process.env.ASSISTANT_JOB_TIMEOUT_MS,
+    900_000,
+  ),
   DISCORD_MESSAGE_GATEWAY_ENABLED:
     process.env.DISCORD_MESSAGE_GATEWAY_ENABLED ?? "false",
 };
