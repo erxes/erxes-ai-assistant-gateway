@@ -20,6 +20,7 @@ import {
   type DiscordFilePayload,
   type LongOperationJobRequest,
 } from "./messageGateway.js";
+import { SECRET_REFUSAL_MESSAGE } from "../security/secretGuard.js";
 
 const buildDeliverFiles = (
   openclawUrl: string,
@@ -30,7 +31,7 @@ const buildDeliverFiles = (
   }
 
   return async (files: RuntimeGeneratedFile[]) => {
-    const { payloads, failed } = await buildRuntimeFilePayloads(
+    const { payloads, failed, blocked } = await buildRuntimeFilePayloads(
       openclawUrl,
       files,
       downloadRuntimeGeneratedFile,
@@ -40,7 +41,11 @@ const buildDeliverFiles = (
       await sendFiles("Here is the generated file.", payloads);
     }
 
-    if (failed.length > 0 || payloads.length === 0) {
+    if (blocked.length > 0) {
+      await sendFiles(SECRET_REFUSAL_MESSAGE, []).catch(() => undefined);
+    }
+
+    if (failed.length > 0 || (payloads.length === 0 && blocked.length === 0)) {
       throw new Error("Some generated files could not be uploaded");
     }
   };

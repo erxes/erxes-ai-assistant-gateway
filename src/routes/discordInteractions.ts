@@ -15,6 +15,11 @@ import {
 import { launchDiscordLongOperationJob } from "../discord/longJobLauncher.js";
 import { detectLongRunningOperation } from "../discord/longOps.js";
 import {
+  detectProtectedFileRequest,
+  guardOutboundText,
+  SECRET_REFUSAL_MESSAGE,
+} from "../security/secretGuard.js";
+import {
   askOpenClawAssistant,
   downloadRuntimeGeneratedFile,
 } from "../openclaw/client.js";
@@ -111,6 +116,22 @@ discordInteractionsRouter.post(
           content: mappedChannelMessage(guildId, channelId),
           flags: 64,
         },
+      });
+      return;
+    }
+
+    // Layer 1: deny protected-file/config disclosure requests before OpenClaw.
+    const inboundDetection = detectProtectedFileRequest(question);
+    if (inboundDetection.blocked) {
+      logger.info("Discord slash protected-file request denied", {
+        interactionId: interaction.id,
+        guildId,
+        channelId,
+        category: inboundDetection.category,
+      });
+      res.json({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { content: SECRET_REFUSAL_MESSAGE, flags: 64 },
       });
       return;
     }
@@ -215,17 +236,20 @@ discordInteractionsRouter.post(
         },
       });
 
+      // Layer 3: guard outbound text before sending.
+      const guardedAnswer = guardOutboundText(result.answer).text;
+
       await editOriginalInteractionResponse({
         applicationId: interaction.application_id,
         interactionToken: interaction.token,
         content: splitDiscordMessage(
-          result.answer,
+          guardedAnswer,
           env.ERXES_ASSISTANT_REPLY_MAX_CHARS,
         )[0] ?? "The assistant returned an empty response.",
       });
 
       if (result.files.length > 0) {
-        const { payloads, failed } = await buildRuntimeFilePayloads(
+        const { payloads, failed, blocked } = await buildRuntimeFilePayloads(
           binding.openclawUrl,
           result.files,
           downloadRuntimeGeneratedFile,
@@ -240,7 +264,15 @@ discordInteractionsRouter.post(
           }).catch(() => undefined);
         }
 
-        if (failed.length > 0 || payloads.length === 0) {
+        if (blocked.length > 0) {
+          await createFollowupMessage({
+            applicationId: interaction.application_id,
+            interactionToken: interaction.token,
+            content: SECRET_REFUSAL_MESSAGE,
+          }).catch(() => undefined);
+        }
+
+        if (failed.length > 0 || (payloads.length === 0 && blocked.length === 0)) {
           await createFollowupMessage({
             applicationId: interaction.application_id,
             interactionToken: interaction.token,

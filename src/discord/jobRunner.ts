@@ -7,6 +7,7 @@ import type {
   startOpenClawAssistantJob,
 } from "../openclaw/client.js";
 import { splitDiscordMessage } from "./messageGateway.js";
+import { guardOutboundText } from "../security/secretGuard.js";
 
 type AskInput = Parameters<typeof askOpenClawAssistant>[0];
 
@@ -159,11 +160,11 @@ export const runDiscordAssistantJob = async (
       }
 
       if (status.status === "ready") {
-        const outcome = await finish(
-          "ready",
-          { status: "ready" },
+        // Layer 3: guard the async final answer text before sending.
+        const guardedAnswer = guardOutboundText(
           status.answer || "The operation finished, but no result text was returned.",
-        );
+        ).text;
+        const outcome = await finish("ready", { status: "ready" }, guardedAnswer);
 
         if (status.files?.length && params.deliverFiles) {
           await params.deliverFiles(status.files).catch(async () => {
