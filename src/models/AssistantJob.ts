@@ -31,6 +31,7 @@ const assistantJobSchema = new Schema(
       default: "started",
     },
     error: { type: String, trim: true },
+    errorCategory: { type: String, trim: true },
   },
   { timestamps: true },
 );

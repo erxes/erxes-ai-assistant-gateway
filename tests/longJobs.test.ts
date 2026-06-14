@@ -343,10 +343,10 @@ test("long operation job replies go back to the thread when started in a thread"
   ]);
 });
 
-test("short chat still uses the synchronous ask path", async () => {
+test("normal chat is async-first: routed as a delayed-ack quiet job, no sync ask", async () => {
   const fixture = createJobMessageFixture({ content: "what is our pipeline?" });
   let asked = false;
-  let jobStarted = false;
+  let jobRequest: any = null;
 
   await handleDiscordMessage(fixture.message, {
     logger: { error: () => undefined } as any,
@@ -355,12 +355,251 @@ test("short chat still uses the synchronous ask path", async () => {
       asked = true;
       return "pipeline answer";
     },
-    runLongOperationJob: async () => {
-      jobStarted = true;
+    runLongOperationJob: async (request) => {
+      jobRequest = request;
     },
   });
 
-  assert.equal(asked, true);
-  assert.equal(jobStarted, false);
+  // Exactly one model path: the async job. No sync /ask call.
+  assert.equal(asked, false);
+  assert.ok(jobRequest);
+  assert.equal(jobRequest.opType, "chat");
+  assert.equal(jobRequest.ackMode, "delayed");
+  assert.equal(jobRequest.quiet, true);
+  assert.equal(jobRequest.ask.question, "what is our pipeline?");
+  // No immediate reply for normal chat — the runner decides if/when to ack.
+  assert.equal(fixture.replies.length, 0);
+});
+
+test("normal chat first outbound replies to the message, later ones go to the channel", async () => {
+  const fixture = createJobMessageFixture({ content: "hello there" });
+  let jobRequest: any = null;
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => binding,
+    askAssistant: async () => "unused",
+    runLongOperationJob: async (request) => {
+      jobRequest = request;
+    },
+  });
+
+  await jobRequest.ack("Still working — I'll post the answer here when it's ready.");
+  await jobRequest.notify("final answer");
+  await jobRequest.notify("second chunk");
+
   assert.equal(fixture.replies.length, 1);
+  assert.match((fixture.replies[0] as any).content, /Still working/);
+  assert.equal(fixture.sends.length, 2);
+  assert.equal((fixture.sends[0] as any).content, "final answer");
+});
+
+test("image-only chat goes through the async-first path with attachments intact", async () => {
+  const attachment = {
+    name: "photo.png",
+    contentType: "image/png",
+    size: 1024,
+    url: "https://cdn.discordapp.com/attachments/1/2/photo.png?ex=a&is=b&hm=c",
+  };
+  const fixture = createJobMessageFixture({
+    content: "Describe this image.",
+    attachments: { size: 1, map: (fn: (item: unknown) => unknown) => [fn(attachment)] },
+  });
+  let jobRequest: any = null;
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined, info: () => undefined } as any,
+    findBinding: async () => binding,
+    askAssistant: async () => "unused",
+    runLongOperationJob: async (request) => {
+      jobRequest = request;
+    },
+  });
+
+  assert.ok(jobRequest);
+  assert.equal(jobRequest.opType, "chat");
+  assert.equal(jobRequest.ackMode, "delayed");
+  assert.equal(jobRequest.ask.discord.attachments.length, 1);
+  assert.equal(jobRequest.ask.discord.attachments[0].kind, "image");
+});
+
+test("thread chat keeps thread routing through the async-first path", async () => {
+  const fixture = createJobMessageFixture({
+    content: "thread question",
+    channelId: "thread-9",
+    channel: {
+      sendTyping: async () => undefined,
+      send: async () => undefined,
+      isThread: () => true,
+      parentId: "channel-1",
+      name: "thread name",
+      parent: { name: "general" },
+    },
+  });
+  let jobRequest: any = null;
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => binding,
+    askAssistant: async () => "unused",
+    runLongOperationJob: async (request) => {
+      jobRequest = request;
+    },
+  });
+
+  assert.ok(jobRequest);
+  assert.equal(jobRequest.channelId, "channel-1");
+  assert.equal(jobRequest.threadId, "thread-9");
+  assert.equal(jobRequest.conversationId, "discord:guild-1:channel-1:thread-9");
+});
+
+test("delayed ack mode: quick job answers normally with no 'Still working' ack", async () => {
+  const { store } = createMemoryStore();
+  const acks: string[] = [];
+  const notifications: string[] = [];
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async (content) => acks.push(content),
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => ({
+      id: "job-1",
+      status: "ready" as const,
+      stage: "ready",
+      answer: "quick answer",
+    }),
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    ackDelayMs: 60_000,
+    quiet: true,
+  });
+
+  assert.equal(outcome, "ready");
+  assert.deepEqual(acks, []);
+  assert.deepEqual(notifications, ["quick answer"]);
+});
+
+test("delayed ack mode: slow job sends 'Still working' then the final answer", async () => {
+  const { store } = createMemoryStore();
+  const acks: string[] = [];
+  const notifications: string[] = [];
+  let polls = 0;
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async (content) => acks.push(content),
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => {
+      polls += 1;
+      return polls < 3
+        ? { id: "job-1", status: "running" as const, stage: "running" }
+        : { id: "job-1", status: "ready" as const, stage: "ready", answer: "slow answer" };
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    ackDelayMs: 0,
+    quiet: true,
+  });
+
+  assert.equal(outcome, "ready");
+  assert.deepEqual(acks, [
+    "Still working — I'll post the answer here when it's ready.",
+  ]);
+  assert.deepEqual(notifications, ["slow answer"]);
+});
+
+test("delayed ack mode: failed job posts a structured reason, never the generic fallback", async () => {
+  const { store } = createMemoryStore();
+  const acks: string[] = [];
+  const notifications: string[] = [];
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async (content) => acks.push(content),
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => ({
+      id: "job-1",
+      status: "failed" as const,
+      stage: "failed",
+      error: "fetch failed",
+      category: "runtime_unreachable",
+    }),
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    ackDelayMs: 0,
+    quiet: true,
+  });
+
+  assert.equal(outcome, "failed");
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0], /runtime is currently unreachable/i);
+  assert.notEqual(
+    notifications[0],
+    "The assistant could not respond right now. Please try again shortly.",
+  );
+});
+
+test("quiet mode suppresses intermediate stage messages", async () => {
+  const { store } = createMemoryStore();
+  const notifications: string[] = [];
+  let polls = 0;
+
+  await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async () => undefined,
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => {
+      polls += 1;
+      return polls < 2
+        ? { id: "job-1", status: "verifying" as const, stage: "verifying" }
+        : { id: "job-1", status: "ready" as const, stage: "ready", answer: "done" };
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    ackDelayMs: 60_000,
+    quiet: true,
+  });
+
+  assert.deepEqual(notifications, ["done"]);
+});
+
+test("long operations keep the immediate 'Started' ack through the new options", async () => {
+  const { store } = createMemoryStore();
+  const acks: string[] = [];
+
+  await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async (content) => acks.push(content),
+    notify: async () => undefined,
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => ({ id: "job-1", status: "ready" as const, answer: "ok" }),
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "immediate",
+  });
+
+  assert.deepEqual(acks, ["Started. I'll post progress here."]);
 });

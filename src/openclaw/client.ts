@@ -1,4 +1,8 @@
 import { env } from "../config/env.js";
+import {
+  runtimeErrorFromNetworkFailure,
+  runtimeErrorFromResponse,
+} from "./errors.js";
 
 type AskAssistantInput = {
   openclawUrl: string;
@@ -93,58 +97,43 @@ const parseFileErrors = (value: unknown): string[] =>
     ? value.filter((item): item is string => typeof item === "string").slice(0, 5)
     : [];
 
-const sanitizeRemoteMessage = (text: string) => {
-  if (!text.trim()) {
-    return "empty response body";
-  }
-
-  try {
-    const body = JSON.parse(text) as FlexibleOpenClawResponse;
-    const value = body.error ?? body.message;
-
-    if (typeof value === "string" && value.trim()) {
-      return value.trim().replace(/\s+/g, " ").slice(0, 160);
-    }
-  } catch {
-    // Fall back to the generic summary below for non-JSON bodies.
-  }
-
-  return `response body length ${text.length}`;
-};
-
 export const askOpenClawAssistant = async (
   input: AskAssistantInput,
 ): Promise<AssistantAskResult> => {
-  const response = await fetch(
-    `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(env.OPENCLAW_SHARED_SECRET
-          ? {
-              "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET,
-            }
-          : {}),
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(env.OPENCLAW_SHARED_SECRET
+            ? {
+                "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET,
+              }
+            : {}),
+        },
+        body: JSON.stringify({
+          tenantId: input.tenantId,
+          assistantId: input.assistantId,
+          question: input.question,
+          user: input.user,
+          discord: input.discord,
+          source: "discord",
+        }),
+        signal: AbortSignal.timeout(env.OPENCLAW_REQUEST_TIMEOUT_MS),
       },
-      body: JSON.stringify({
-        tenantId: input.tenantId,
-        assistantId: input.assistantId,
-        question: input.question,
-        user: input.user,
-        discord: input.discord,
-        source: "discord",
-      }),
-      signal: AbortSignal.timeout(env.OPENCLAW_REQUEST_TIMEOUT_MS),
-    },
-  );
+    );
+  } catch (error) {
+    throw runtimeErrorFromNetworkFailure(error);
+  }
 
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `OpenClaw request failed with status ${response.status}: ${sanitizeRemoteMessage(text)}`,
-    );
+    throw runtimeErrorFromResponse(response.status, text);
   }
 
   let body: FlexibleOpenClawResponse & { files?: unknown; fileErrors?: unknown } =
@@ -205,6 +194,8 @@ export type AssistantRuntimeJob = {
   files?: RuntimeGeneratedFile[];
   fileErrors?: string[];
   error?: string;
+  category?: string;
+  safeMessage?: string;
   duplicate?: boolean;
 };
 
@@ -216,33 +207,37 @@ const runtimeSecretHeaders = (): Record<string, string> =>
 export const startOpenClawAssistantJob = async (
   input: AskAssistantInput & { jobKey: string },
 ): Promise<AssistantRuntimeJob> => {
-  const response = await fetch(
-    `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask-async`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...runtimeSecretHeaders(),
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask-async`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...runtimeSecretHeaders(),
+        },
+        body: JSON.stringify({
+          tenantId: input.tenantId,
+          assistantId: input.assistantId,
+          question: input.question,
+          user: input.user,
+          discord: input.discord,
+          source: "discord",
+          jobKey: input.jobKey,
+        }),
+        signal: AbortSignal.timeout(30_000),
       },
-      body: JSON.stringify({
-        tenantId: input.tenantId,
-        assistantId: input.assistantId,
-        question: input.question,
-        user: input.user,
-        discord: input.discord,
-        source: "discord",
-        jobKey: input.jobKey,
-      }),
-      signal: AbortSignal.timeout(30_000),
-    },
-  );
+    );
+  } catch (error) {
+    throw runtimeErrorFromNetworkFailure(error);
+  }
 
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `OpenClaw job start failed with status ${response.status}: ${sanitizeRemoteMessage(text)}`,
-    );
+    throw runtimeErrorFromResponse(response.status, text);
   }
 
   return JSON.parse(text) as AssistantRuntimeJob;
@@ -252,20 +247,24 @@ export const getOpenClawAssistantJob = async (
   openclawUrl: string,
   jobId: string,
 ): Promise<AssistantRuntimeJob> => {
-  const response = await fetch(
-    `${normalizeOpenClawUrl(openclawUrl)}/api/erxes-ai-assistant/jobs/${encodeURIComponent(jobId)}`,
-    {
-      headers: { ...runtimeSecretHeaders() },
-      signal: AbortSignal.timeout(20_000),
-    },
-  );
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${normalizeOpenClawUrl(openclawUrl)}/api/erxes-ai-assistant/jobs/${encodeURIComponent(jobId)}`,
+      {
+        headers: { ...runtimeSecretHeaders() },
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+  } catch (error) {
+    throw runtimeErrorFromNetworkFailure(error);
+  }
 
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `OpenClaw job status failed with status ${response.status}: ${sanitizeRemoteMessage(text)}`,
-    );
+    throw runtimeErrorFromResponse(response.status, text);
   }
 
   return JSON.parse(text) as AssistantRuntimeJob;

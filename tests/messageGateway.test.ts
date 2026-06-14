@@ -186,9 +186,9 @@ test("duplicate message IDs are ignored by the processed cache", () => {
   assert.equal(cache.has("message-1"), true);
 });
 
-test("runtime failures return a safe Discord error", async () => {
+test("runtime failures return a safe Discord error with a reference id", async () => {
   const fixture = createMessage();
-  const logged: unknown[] = [];
+  const logged: any[] = [];
 
   await handleDiscordMessage(fixture.message, {
     logger: { error: (_message: string, metadata: unknown) => logged.push(metadata) } as any,
@@ -199,13 +199,66 @@ test("runtime failures return a safe Discord error", async () => {
   });
 
   assert.equal(logged.length, 1);
-  assert.deepEqual(fixture.replies, [
+  assert.equal(logged[0].errorCategory, "unknown");
+  assert.equal(logged[0].referenceId, "essage-1");
+  assert.equal(logged[0].runtimeHost, "assistant.example.com");
+  assert.equal(fixture.replies.length, 1);
+  const content = (fixture.replies[0] as any).content as string;
+  // Never the old generic fallback; unknown errors carry a reference id and
+  // never leak internal error text.
+  assert.notEqual(
+    content,
+    "The assistant could not respond right now. Please try again shortly.",
+  );
+  assert.match(content, /unexpected error/i);
+  assert.match(content, /\(ref essage-1\)/);
+  assert.doesNotMatch(content, /secret runtime stack trace/);
+});
+
+test("structured runtime errors produce useful Discord messages", async () => {
+  const { OpenClawRuntimeError } = await import("../src/openclaw/errors.js");
+
+  const cases: Array<{ error: Error; expect: RegExp }> = [
     {
-      content:
-        "The assistant could not respond right now. Please try again shortly.",
-      allowedMentions: { repliedUser: false },
+      error: new OpenClawRuntimeError("fetch failed", {
+        category: "runtime_unreachable",
+      }),
+      expect: /runtime is currently unreachable/i,
     },
-  ]);
+    {
+      error: new OpenClawRuntimeError("provider timeout", {
+        category: "provider_timeout",
+      }),
+      expect: /provider timed out.*no changes were applied/i,
+    },
+    {
+      error: new OpenClawRuntimeError("plugin broke", {
+        category: "plugin_quarantined",
+        pluginId: "bad-plugin",
+      }),
+      expect: /plugin bad-plugin is installed, but it could not be loaded.*assistant keeps working/i,
+    },
+  ];
+
+  for (const { error, expect } of cases) {
+    const fixture = createMessage();
+
+    await handleDiscordMessage(fixture.message, {
+      logger: { error: () => undefined } as any,
+      findBinding: async () => createBinding(),
+      askAssistant: async () => {
+        throw error;
+      },
+    });
+
+    assert.equal(fixture.replies.length, 1);
+    const content = (fixture.replies[0] as any).content as string;
+    assert.match(content, expect);
+    assert.notEqual(
+      content,
+      "The assistant could not respond right now. Please try again shortly.",
+    );
+  }
 });
 
 test("long replies are split safely", async () => {

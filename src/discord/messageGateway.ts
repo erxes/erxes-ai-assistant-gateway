@@ -19,6 +19,11 @@ import {
   type RuntimeGeneratedFile,
 } from "../openclaw/client.js";
 import {
+  buildReferenceId,
+  categorizeError,
+  friendlyRuntimeErrorMessage,
+} from "../openclaw/errors.js";
+import {
   launchDiscordLongOperationJob,
   resumeStaleAssistantJobs,
 } from "./longJobLauncher.js";
@@ -55,6 +60,9 @@ export type LongOperationJobRequest = {
   sendFiles?: (caption: string, files: DiscordFilePayload[]) => Promise<unknown>;
   timeoutMs?: number;
   skipAck?: boolean;
+  ackMode?: "immediate" | "delayed";
+  ackDelayMs?: number;
+  quiet?: boolean;
 };
 
 type MessageGatewayDeps = {
@@ -433,35 +441,76 @@ export const handleDiscordMessage = async (
   const opType =
     detectedOpType ?? (hasFileAttachment ? "file-processing" : null);
 
-  if (opType && deps.runLongOperationJob) {
+  // Async-first: every Discord message runs through the runtime job path so
+  // slow model answers cannot hit the sync request timeout. Long operations
+  // keep their immediate "Started…" ack; normal chat acks only if the answer
+  // is still pending after the configured delay.
+  if (deps.runLongOperationJob) {
+    const isLongOp = Boolean(opType);
+
+    // For normal chat the first outbound message (delayed ack or the final
+    // answer, whichever comes first) replies to the user's message; the rest
+    // go to the channel/thread like the old sync path did.
+    let firstOutbound = true;
+    const replyOrSend = (content: string) => {
+      if (firstOutbound) {
+        firstOutbound = false;
+        return message.reply({
+          content,
+          allowedMentions: { repliedUser: false },
+        });
+      }
+      return channel.send!({
+        content,
+        allowedMentions: { repliedUser: false },
+      });
+    };
+
+    let typingRefresh: ReturnType<typeof setInterval> | undefined;
+    if (!isLongOp) {
+      await Promise.resolve(channel.sendTyping?.()).catch(() => undefined);
+      typingRefresh = setInterval(() => {
+        void Promise.resolve(channel.sendTyping?.()).catch(() => undefined);
+      }, TYPING_REFRESH_INTERVAL_MS);
+    }
+
     void deps
       .runLongOperationJob({
-        opType,
+        opType: opType ?? "chat",
         ask: askInput,
         messageId: message.id,
         conversationId,
         guildId,
         channelId: target.bindingChannelId,
         threadId: target.threadId,
-        ack: (content: string) =>
-          message.reply({ content, allowedMentions: { repliedUser: false } }),
-        notify: (content: string) =>
-          channel.send!({ content, allowedMentions: { repliedUser: false } }),
+        ack: isLongOp
+          ? (content: string) =>
+              message.reply({ content, allowedMentions: { repliedUser: false } })
+          : replyOrSend,
+        notify: isLongOp
+          ? (content: string) =>
+              channel.send!({ content, allowedMentions: { repliedUser: false } })
+          : replyOrSend,
         sendFiles: (caption: string, files: DiscordFilePayload[]) =>
           channel.send!({
             content: caption,
             allowedMentions: { repliedUser: false },
             files,
           }),
+        ackMode: isLongOp ? "immediate" : "delayed",
+        quiet: !isLongOp,
       })
       .catch((error) => {
-        deps.logger.error("Discord long operation job failed to start", {
+        deps.logger.error("Discord assistant job failed to start", {
           guildId,
           channelId,
           messageId: message.id,
           assistantId: binding.assistantId,
           error: error instanceof Error ? error.message : String(error),
         });
+      })
+      .finally(() => {
+        if (typingRefresh) clearInterval(typingRefresh);
       });
     await sendSkippedNote();
     return;
@@ -581,18 +630,28 @@ export const handleDiscordMessage = async (
 
     await sendSkippedNote();
   } catch (error) {
+    const referenceId = buildReferenceId(message.id);
+    let runtimeHost: string | undefined;
+    try {
+      runtimeHost = new URL(binding.openclawUrl).hostname;
+    } catch {
+      runtimeHost = undefined;
+    }
+
     deps.logger.error("Discord message handling failed", {
       guildId,
       channelId,
       messageId: message.id,
       assistantId: binding.assistantId,
+      runtimeHost,
+      referenceId,
+      errorCategory: categorizeError(error),
       error: error instanceof Error ? error.message : String(error),
     });
 
     await message
       .reply({
-        content:
-          "The assistant could not respond right now. Please try again shortly.",
+        content: friendlyRuntimeErrorMessage(error, referenceId),
         allowedMentions: { repliedUser: false },
       })
       .catch((replyError) => {

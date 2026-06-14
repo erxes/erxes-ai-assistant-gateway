@@ -8,6 +8,11 @@ import type {
 } from "../openclaw/client.js";
 import { splitDiscordMessage } from "./messageGateway.js";
 import { guardOutboundText } from "../security/secretGuard.js";
+import {
+  buildReferenceId,
+  categorizeError,
+  friendlyRuntimeErrorMessage,
+} from "../openclaw/errors.js";
 
 type AskInput = Parameters<typeof askOpenClawAssistant>[0];
 
@@ -47,14 +52,69 @@ export type RunDiscordAssistantJobParams = {
   sleep?: (ms: number) => Promise<void>;
   runtimeJobId?: string;
   skipAck?: boolean;
+  /**
+   * "immediate" (default) acks with "Started…" before polling — used for
+   * known long operations. "delayed" stays silent and only acks with
+   * "Still working…" if the job is not done after ackDelayMs — used for
+   * normal chat so quick answers arrive without ceremony.
+   */
+  ackMode?: "immediate" | "delayed";
+  ackDelayMs?: number;
+  /** Suppress intermediate stage messages (normal chat). */
+  quiet?: boolean;
   deliverFiles?: (files: RuntimeGeneratedFile[]) => Promise<void>;
 };
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+export const IMMEDIATE_ACK_MESSAGE = "Started. I'll post progress here.";
+export const DELAYED_ACK_MESSAGE =
+  "Still working — I'll post the answer here when it's ready.";
+
+const safeRuntimeHost = (openclawUrl: string): string | undefined => {
+  try {
+    return new URL(openclawUrl).hostname;
+  } catch {
+    return undefined;
+  }
+};
+
 const STAGE_MESSAGES: Record<string, string> = {
   verifying: "Verifying the result…",
+};
+
+/**
+ * Turn a failed runtime job into a useful Discord message. Prefers the
+ * runtime's own safeMessage, then its error category, and only then a raw
+ * error summary — never a generic "could not respond".
+ */
+export const describeJobFailure = (status: {
+  error?: string;
+  category?: string;
+  safeMessage?: string;
+}): string => {
+  if (status.safeMessage) return status.safeMessage;
+
+  const error = status.error || "";
+
+  if (/adapter restarted while the job was running/i.test(error)) {
+    return "The runtime restarted before this job completed. Please retry.";
+  }
+
+  switch (status.category) {
+    case "runtime_unreachable":
+      return "The assistant runtime is currently unreachable. I could not complete the operation. Please retry shortly.";
+    case "provider_timeout":
+      return "The model provider timed out while processing this request. Please retry; no changes were applied.";
+    case "runtime_timeout":
+      return "The operation timed out on the runtime. It may still need cleanup; please retry.";
+    case "plugin_quarantined":
+    case "plugin_validation_failed":
+      return "A plugin involved in this operation is installed but could not be loaded, so it was kept unloaded. The assistant and other features keep working; it can be retried any time.";
+    default:
+      return `The operation failed: ${error || "unknown error"}`;
+  }
 };
 
 const safeJobLogFields = (record: AssistantJobRecord) => ({
@@ -90,6 +150,8 @@ export const runDiscordAssistantJob = async (
   } = params;
   const sleep = params.sleep ?? defaultSleep;
   const startedAt = Date.now();
+  const ackMode = params.ackMode ?? "immediate";
+  let acked = false;
 
   if (!params.runtimeJobId) {
     const creation = await store.create(record);
@@ -101,10 +163,19 @@ export const runDiscordAssistantJob = async (
       return "duplicate";
     }
 
-    if (!params.skipAck) {
-      await ack("Started. I'll post progress here.").catch(() => undefined);
+    if (!params.skipAck && ackMode === "immediate") {
+      await ack(IMMEDIATE_ACK_MESSAGE).catch(() => undefined);
+      acked = true;
     }
   }
+
+  const ackDeadline = startedAt + (params.ackDelayMs ?? 10_000);
+  const sendDelayedAckIfDue = async () => {
+    if (acked || params.skipAck || ackMode !== "delayed") return;
+    if (Date.now() < ackDeadline) return;
+    acked = true;
+    await ack(DELAYED_ACK_MESSAGE).catch(() => undefined);
+  };
 
   const finish = async (
     outcome: "ready" | "failed" | "timeout",
@@ -123,6 +194,7 @@ export const runDiscordAssistantJob = async (
 
     params.logger.info("Discord assistant job finished", {
       ...safeJobLogFields(record),
+      runtimeHost: safeRuntimeHost(record.openclawUrl),
       outcome,
       durationMs: Date.now() - startedAt,
     });
@@ -150,6 +222,7 @@ export const runDiscordAssistantJob = async (
 
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs);
+      await sendDelayedAckIfDue();
 
       let status: AssistantRuntimeJob | null = null;
 
@@ -186,8 +259,12 @@ export const runDiscordAssistantJob = async (
       if (status.status === "failed") {
         return await finish(
           "failed",
-          { status: "failed", error: status.error || "Job failed" },
-          `The operation failed: ${status.error || "unknown error"}`,
+          {
+            status: "failed",
+            error: status.error || "Job failed",
+            errorCategory: status.category,
+          },
+          describeJobFailure(status),
         );
       }
 
@@ -197,7 +274,7 @@ export const runDiscordAssistantJob = async (
           .update(record.idempotencyKey, { status: status.status })
           .catch(() => undefined);
 
-        const stageMessage = STAGE_MESSAGES[status.stage];
+        const stageMessage = params.quiet ? undefined : STAGE_MESSAGES[status.stage];
 
         if (stageMessage) {
           await notify(stageMessage).catch(() => undefined);
@@ -213,16 +290,19 @@ export const runDiscordAssistantJob = async (
   } catch (error) {
     const messageText =
       error instanceof Error ? error.message : "unknown error";
+    const referenceId = buildReferenceId(record.messageId);
 
     params.logger.error("Discord assistant job errored", {
       ...safeJobLogFields(record),
+      referenceId,
+      errorCategory: categorizeError(error),
       error: messageText,
     });
 
     return await finish(
       "failed",
-      { status: "failed", error: messageText },
-      "The operation could not be started or tracked. Please try again.",
+      { status: "failed", error: messageText, errorCategory: categorizeError(error) },
+      friendlyRuntimeErrorMessage(error, referenceId),
     );
   }
 };
