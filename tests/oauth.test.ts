@@ -68,20 +68,127 @@ test("OAuth install URL contains required Discord install parameters", () => {
   assert.equal(url.searchParams.get("state"), "state-1");
 });
 
-test("return URL allowlist accepts matching origin and path only", () => {
-  env.ERXES_ALLOWED_RETURN_URLS =
-    "http://localhost:3000/settings,https://admin.erxes.io";
+const withReturnUrlEnv = (overrides: {
+  urls?: string;
+  secureSuffixes?: string;
+  insecureSuffixes?: string;
+}) => {
+  Object.assign(env, {
+    ERXES_ALLOWED_RETURN_URLS: overrides.urls ?? "",
+    ERXES_ALLOWED_RETURN_HOST_SUFFIXES: overrides.secureSuffixes ?? "",
+    ERXES_ALLOWED_RETURN_INSECURE_HOST_SUFFIXES:
+      overrides.insecureSuffixes ?? "",
+  });
+};
 
+test("return URL allowlist accepts any path on an exact allowed origin", () => {
+  withReturnUrlEnv({
+    urls: "http://localhost:3000,https://admin.erxes.io",
+  });
+
+  // Exact origin match allows any path under that origin.
   assert.equal(
-    validateReturnUrl("http://localhost:3000/settings/automations/agents/1"),
-    "http://localhost:3000/settings/automations/agents/1",
+    validateReturnUrl("https://admin.erxes.io"),
+    "https://admin.erxes.io/",
   );
   assert.equal(
     validateReturnUrl("https://admin.erxes.io/settings/automations"),
     "https://admin.erxes.io/settings/automations",
   );
-  assert.equal(validateReturnUrl("http://localhost:3001/settings"), undefined);
+
+  // A different origin (not localhost, not in allowlist, no suffix) is blocked.
+  assert.equal(
+    validateReturnUrl("https://other.example.com/settings"),
+    undefined,
+  );
   assert.equal(validateReturnUrl("not-a-url"), undefined);
+});
+
+test("return URL allows HTTPS subdomains matching an allowed host suffix", () => {
+  withReturnUrlEnv({
+    urls: "https://enterprise.erxes.io,https://officenext.erxes.io",
+    secureSuffixes: ".erxes.io",
+  });
+
+  assert.equal(
+    validateReturnUrl("https://enterprise.erxes.io/agent/assistant"),
+    "https://enterprise.erxes.io/agent/assistant",
+  );
+  assert.equal(
+    validateReturnUrl("https://officenext.erxes.io/agent/assistant"),
+    "https://officenext.erxes.io/agent/assistant",
+  );
+  assert.equal(
+    validateReturnUrl("https://abc.erxes.io/anything"),
+    "https://abc.erxes.io/anything",
+  );
+});
+
+test("return URL allows HTTP subdomains only when insecure suffix is enabled", () => {
+  withReturnUrlEnv({
+    secureSuffixes: ".erxes.io",
+    insecureSuffixes: ".erxes.io",
+  });
+
+  assert.equal(
+    validateReturnUrl("http://abc.erxes.io/agent/assistant"),
+    "http://abc.erxes.io/agent/assistant",
+  );
+
+  // Without the insecure suffix env, the same HTTP URL is blocked.
+  withReturnUrlEnv({ secureSuffixes: ".erxes.io" });
+  assert.equal(
+    validateReturnUrl("http://abc.erxes.io/agent/assistant"),
+    undefined,
+  );
+});
+
+test("return URL blocks look-alike and nested evil hosts", () => {
+  withReturnUrlEnv({
+    urls: "https://enterprise.erxes.io",
+    secureSuffixes: ".erxes.io",
+    insecureSuffixes: ".erxes.io",
+  });
+
+  // No dot boundary: "evil-erxes.io" must not match the ".erxes.io" suffix.
+  assert.equal(
+    validateReturnUrl("https://evil-erxes.io/agent/assistant"),
+    undefined,
+  );
+  assert.equal(
+    validateReturnUrl("http://evil-erxes.io/agent/assistant"),
+    undefined,
+  );
+
+  // Suffix not at the end: "abc.erxes.io.evil.com" must not match.
+  assert.equal(
+    validateReturnUrl("https://abc.erxes.io.evil.com/agent/assistant"),
+    undefined,
+  );
+  assert.equal(
+    validateReturnUrl("http://abc.erxes.io.evil.com/agent/assistant"),
+    undefined,
+  );
+
+  // Arbitrary domains with no allowlist/suffix entry stay blocked.
+  assert.equal(
+    validateReturnUrl("https://attacker.example.com/agent/assistant"),
+    undefined,
+  );
+  assert.equal(validateReturnUrl("not-a-url"), undefined);
+});
+
+test("return URL always allows localhost and 127.0.0.1 for local dev", () => {
+  withReturnUrlEnv({});
+
+  assert.equal(
+    validateReturnUrl("http://localhost:3000/agent/assistant"),
+    "http://localhost:3000/agent/assistant",
+  );
+  assert.equal(
+    validateReturnUrl("http://127.0.0.1:3000/agent/assistant"),
+    "http://127.0.0.1:3000/agent/assistant",
+  );
 });
 
 type CallbackDepsOverrides = Partial<{

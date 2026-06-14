@@ -18,6 +18,25 @@ export const buildDiscordInstallUrl = (state: string) => {
   return url.toString();
 };
 
+const parseCsv = (value?: string) =>
+  (value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const hostnameMatchesSuffix = (hostname: string, suffix: string) => {
+  const normalizedSuffix = suffix.toLowerCase();
+
+  // A suffix must start with "." so it can only match whole sub-labels.
+  // This blocks tricks like "evil-erxes.io" (no leading dot boundary) and
+  // "abc.erxes.io.evil.com" (the suffix is not at the end of the hostname).
+  if (!normalizedSuffix.startsWith(".")) {
+    return false;
+  }
+
+  return hostname.endsWith(normalizedSuffix);
+};
+
 export const validateReturnUrl = (returnUrl?: string) => {
   if (!returnUrl) {
     return undefined;
@@ -31,24 +50,54 @@ export const validateReturnUrl = (returnUrl?: string) => {
     return undefined;
   }
 
-  const allowed = env.ERXES_ALLOWED_RETURN_URLS.split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const hostname = parsedReturnUrl.hostname.toLowerCase();
+  const origin = parsedReturnUrl.origin.toLowerCase();
+  const protocol = parsedReturnUrl.protocol;
 
-  for (const allowedUrl of allowed) {
+  const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
+
+  // Exact origin allowlist (scheme + host + port). No path restriction:
+  // an allowed origin may redirect to any path under that origin.
+  const allowedOrigins = parseCsv(env.ERXES_ALLOWED_RETURN_URLS).map((item) => {
     try {
-      const parsedAllowedUrl = new URL(allowedUrl);
-      const sameOrigin = parsedAllowedUrl.origin === parsedReturnUrl.origin;
-      const pathAllowed =
-        parsedAllowedUrl.pathname === "/" ||
-        parsedReturnUrl.pathname.startsWith(parsedAllowedUrl.pathname);
-
-      if (sameOrigin && pathAllowed) {
-        return parsedReturnUrl.toString();
-      }
+      return new URL(item).origin.toLowerCase();
     } catch {
-      continue;
+      return item.toLowerCase();
     }
+  });
+
+  if (allowedOrigins.includes(origin)) {
+    return parsedReturnUrl.toString();
+  }
+
+  if (isLocalhost && (protocol === "http:" || protocol === "https:")) {
+    return parsedReturnUrl.toString();
+  }
+
+  const allowedSecureSuffixes = parseCsv(
+    env.ERXES_ALLOWED_RETURN_HOST_SUFFIXES,
+  ).map((item) => item.toLowerCase());
+
+  const allowedInsecureSuffixes = parseCsv(
+    env.ERXES_ALLOWED_RETURN_INSECURE_HOST_SUFFIXES,
+  ).map((item) => item.toLowerCase());
+
+  if (
+    protocol === "https:" &&
+    allowedSecureSuffixes.some((suffix) =>
+      hostnameMatchesSuffix(hostname, suffix),
+    )
+  ) {
+    return parsedReturnUrl.toString();
+  }
+
+  if (
+    protocol === "http:" &&
+    allowedInsecureSuffixes.some((suffix) =>
+      hostnameMatchesSuffix(hostname, suffix),
+    )
+  ) {
+    return parsedReturnUrl.toString();
   }
 
   return undefined;
