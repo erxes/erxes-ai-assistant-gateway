@@ -12,6 +12,7 @@ import {
   createFollowupMessage,
   editOriginalInteractionResponse,
 } from "../discord/respond.js";
+import { sendChannelMessage } from "../discord/api.js";
 import { launchDiscordLongOperationJob } from "../discord/longJobLauncher.js";
 import { detectLongRunningOperation } from "../discord/longOps.js";
 import {
@@ -186,12 +187,32 @@ discordInteractionsRouter.post(
         // Interaction tokens expire after 15 minutes; stop polling before that.
         timeoutMs: Math.min(env.ASSISTANT_JOB_TIMEOUT_MS, 13 * 60_000),
         ack: async () => undefined,
-        notify: (content: string) =>
-          createFollowupMessage({
-            applicationId: interaction.application_id,
-            interactionToken: interaction.token,
-            content,
-          }),
+        notify: async (content: string) => {
+          try {
+            return await createFollowupMessage({
+              applicationId: interaction.application_id,
+              interactionToken: interaction.token,
+              content,
+            });
+          } catch (followupError) {
+            // The interaction webhook token is the only fragile delivery
+            // surface (it expires / can fail late). Fall back to a normal bot
+            // channel message so the answer still reaches the channel.
+            logger.error(
+              "Discord slash follow-up failed; falling back to channel message",
+              {
+                interactionId: interaction.id,
+                guildId,
+                channelId,
+                error:
+                  followupError instanceof Error
+                    ? followupError.message
+                    : String(followupError),
+              },
+            );
+            return await sendChannelMessage(channelId, content);
+          }
+        },
         sendFiles: (caption, files) =>
           createFollowupMessage({
             applicationId: interaction.application_id,

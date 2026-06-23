@@ -12,6 +12,7 @@ import {
   buildReferenceId,
   categorizeError,
   friendlyRuntimeErrorMessage,
+  OpenClawRuntimeError,
 } from "../openclaw/errors.js";
 
 type AskInput = Parameters<typeof askOpenClawAssistant>[0];
@@ -71,6 +72,12 @@ const defaultSleep = (ms: number) =>
 export const IMMEDIATE_ACK_MESSAGE = "Started. I'll post progress here.";
 export const DELAYED_ACK_MESSAGE =
   "Still working — I'll post the answer here when it's ready.";
+
+// Give up polling once the runtime is persistently unreachable instead of
+// silently looping until the full job timeout. A 404 means the job file is
+// gone (e.g. the adapter's job store was wiped), so fail faster on that.
+const MAX_CONSECUTIVE_POLL_ERRORS = 12;
+const MAX_CONSECUTIVE_JOB_NOT_FOUND = 3;
 
 const safeRuntimeHost = (openclawUrl: string): string | undefined => {
   try {
@@ -182,20 +189,46 @@ export const runDiscordAssistantJob = async (
     patch: Record<string, unknown>,
     message?: string,
   ) => {
-    await store
-      .update(record.idempotencyKey, patch)
-      .catch(() => undefined);
+    // Deliver the answer/message BEFORE persisting the terminal status, so a
+    // failed Discord send is never recorded as a delivered "ready" job and is
+    // never silently swallowed.
+    let delivered = true;
 
     if (message) {
       for (const chunk of splitDiscordMessage(message)) {
-        await notify(chunk).catch(() => undefined);
+        try {
+          await notify(chunk);
+        } catch (deliveryError) {
+          delivered = false;
+          params.logger.error("Discord assistant job delivery failed", {
+            ...safeJobLogFields(record),
+            runtimeHost: safeRuntimeHost(record.openclawUrl),
+            outcome,
+            error:
+              deliveryError instanceof Error
+                ? deliveryError.message
+                : String(deliveryError),
+          });
+          break;
+        }
       }
     }
+
+    // If a "ready" answer could not be delivered, leave the job in a status
+    // that resumeStaleAssistantJobs re-picks so it can be redelivered later
+    // rather than marking it done with the answer lost.
+    const persistPatch =
+      delivered || outcome !== "ready" ? patch : { status: "running" };
+
+    await store
+      .update(record.idempotencyKey, persistPatch)
+      .catch(() => undefined);
 
     params.logger.info("Discord assistant job finished", {
       ...safeJobLogFields(record),
       runtimeHost: safeRuntimeHost(record.openclawUrl),
       outcome,
+      delivered,
       durationMs: Date.now() - startedAt,
     });
 
@@ -218,6 +251,7 @@ export const runDiscordAssistantJob = async (
     }
 
     let lastStage = "running";
+    let consecutivePollErrors = 0;
     const deadline = startedAt + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -228,7 +262,43 @@ export const runDiscordAssistantJob = async (
 
       try {
         status = await getJob(record.openclawUrl, runtimeJobId);
-      } catch {
+        consecutivePollErrors = 0;
+      } catch (pollError) {
+        consecutivePollErrors += 1;
+        const errorCategory = categorizeError(pollError);
+        const httpStatus =
+          pollError instanceof OpenClawRuntimeError
+            ? pollError.status
+            : undefined;
+        const errorMessage =
+          pollError instanceof Error ? pollError.message : String(pollError);
+
+        // Previously every poll error was swallowed (`catch { continue }`), so a
+        // broken/wiped /jobs/:id was indistinguishable from "still working"
+        // until the timeout. Log each failure and give up once it is terminal.
+        params.logger.error("Discord assistant job poll failed", {
+          ...safeJobLogFields(record),
+          runtimeHost: safeRuntimeHost(record.openclawUrl),
+          runtimeJobId,
+          errorCategory,
+          httpStatus,
+          consecutivePollErrors,
+          error: errorMessage,
+        });
+
+        const jobGone =
+          httpStatus === 404 &&
+          consecutivePollErrors >= MAX_CONSECUTIVE_JOB_NOT_FOUND;
+
+        if (jobGone || consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          const referenceId = buildReferenceId(record.messageId);
+          return await finish(
+            "failed",
+            { status: "failed", error: errorMessage, errorCategory },
+            friendlyRuntimeErrorMessage(pollError, referenceId),
+          );
+        }
+
         continue;
       }
 

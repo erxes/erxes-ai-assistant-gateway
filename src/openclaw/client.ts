@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import {
+  OpenClawRuntimeError,
   runtimeErrorFromNetworkFailure,
   runtimeErrorFromResponse,
 } from "./errors.js";
@@ -46,6 +47,43 @@ type FlexibleOpenClawResponse = {
 
 const normalizeOpenClawUrl = (openclawUrl: string) =>
   openclawUrl.replace(/\/+$/, "");
+
+// Transient connect-level failures (pod restarting / cold start / ingress
+// 502/503 / "fetch failed") surface as runtime_unreachable. Retry only those a
+// few times with backoff so a brief blip doesn't fail the whole Discord
+// request. Never retry timeouts, provider rate limits (429), or tool failures —
+// retrying those would duplicate real work or hammer the provider.
+const RUNTIME_RETRY_ATTEMPTS = 3;
+const RUNTIME_RETRY_BASE_MS = 800;
+
+const isRetryableRuntimeError = (error: unknown): boolean =>
+  error instanceof OpenClawRuntimeError &&
+  error.category === "runtime_unreachable";
+
+const withRuntimeRetry = async <T>(fn: () => Promise<T>): Promise<T> => {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < RUNTIME_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      if (
+        !isRetryableRuntimeError(error) ||
+        attempt === RUNTIME_RETRY_ATTEMPTS - 1
+      ) {
+        throw error;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, RUNTIME_RETRY_BASE_MS * 2 ** attempt),
+      );
+    }
+  }
+
+  throw lastError;
+};
 
 export type RuntimeGeneratedFile = {
   fileId: string;
@@ -97,7 +135,7 @@ const parseFileErrors = (value: unknown): string[] =>
     ? value.filter((item): item is string => typeof item === "string").slice(0, 5)
     : [];
 
-export const askOpenClawAssistant = async (
+const askOpenClawAssistantOnce = async (
   input: AskAssistantInput,
 ): Promise<AssistantAskResult> => {
   let response: Response;
@@ -154,6 +192,11 @@ export const askOpenClawAssistant = async (
   };
 };
 
+export const askOpenClawAssistant = (
+  input: AskAssistantInput,
+): Promise<AssistantAskResult> =>
+  withRuntimeRetry(() => askOpenClawAssistantOnce(input));
+
 const MAX_RUNTIME_FILE_DOWNLOAD_BYTES = 9 * 1024 * 1024;
 
 export const downloadRuntimeGeneratedFile = async (
@@ -204,7 +247,7 @@ const runtimeSecretHeaders = (): Record<string, string> =>
     ? { "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET }
     : {};
 
-export const startOpenClawAssistantJob = async (
+const startOpenClawAssistantJobOnce = async (
   input: AskAssistantInput & { jobKey: string },
 ): Promise<AssistantRuntimeJob> => {
   let response: Response;
@@ -242,6 +285,11 @@ export const startOpenClawAssistantJob = async (
 
   return JSON.parse(text) as AssistantRuntimeJob;
 };
+
+export const startOpenClawAssistantJob = (
+  input: AskAssistantInput & { jobKey: string },
+): Promise<AssistantRuntimeJob> =>
+  withRuntimeRetry(() => startOpenClawAssistantJobOnce(input));
 
 export const getOpenClawAssistantJob = async (
   openclawUrl: string,

@@ -134,6 +134,17 @@ export const getDiscordGuild = (guildId: string) =>
 export const getDiscordGuildChannels = (guildId: string) =>
   discordFetch<DiscordChannel[]>(`/guilds/${guildId}/channels`);
 
+// Post a plain message to a channel via the bot token. Used as a delivery
+// fallback when an interaction-token follow-up is no longer usable.
+export const sendChannelMessage = (channelId: string, content: string) =>
+  discordFetch(`/channels/${channelId}/messages`, {
+    method: "POST",
+    body: {
+      content: content.slice(0, 2000),
+      allowed_mentions: { parse: [] },
+    },
+  });
+
 export type DiscordOAuthTokenResponse = {
   access_token?: string;
   token_type?: string;
