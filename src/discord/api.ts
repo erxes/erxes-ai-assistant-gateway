@@ -126,13 +126,34 @@ export type DiscordChannel = {
   type: number;
   position?: number;
   parent_id?: string;
+  guild_id?: string;
 };
+
+export const getDiscordChannel = (channelId: string) =>
+  discordFetch<DiscordChannel>(`/channels/${channelId}`);
 
 export const getDiscordGuild = (guildId: string) =>
   discordFetch<DiscordGuild>(`/guilds/${guildId}`);
 
 export const getDiscordGuildChannels = (guildId: string) =>
   discordFetch<DiscordChannel[]>(`/guilds/${guildId}/channels`);
+
+// Create a channel in a guild. The bot is invited with Administrator, so it has
+// Manage Channels. type 0 = GUILD_TEXT.
+export const createGuildChannel = (
+  guildId: string,
+  name: string,
+  options: { type?: number; parentId?: string; topic?: string } = {},
+) =>
+  discordFetch<DiscordChannel>(`/guilds/${guildId}/channels`, {
+    method: "POST",
+    body: {
+      name,
+      type: options.type ?? 0,
+      ...(options.parentId ? { parent_id: options.parentId } : {}),
+      ...(options.topic ? { topic: options.topic.slice(0, 1024) } : {}),
+    },
+  });
 
 // Post a plain message to a channel via the bot token. Used as a delivery
 // fallback when an interaction-token follow-up is no longer usable.

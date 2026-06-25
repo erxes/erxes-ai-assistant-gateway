@@ -8,6 +8,7 @@ import type {
 } from "../openclaw/client.js";
 import { splitDiscordMessage } from "./messageGateway.js";
 import { guardOutboundText } from "../security/secretGuard.js";
+import { applyChannelCreateMarkers } from "./channelActions.js";
 import {
   buildReferenceId,
   categorizeError,
@@ -307,7 +308,19 @@ export const runDiscordAssistantJob = async (
         const guardedAnswer = guardOutboundText(
           status.answer || "The operation finished, but no result text was returned.",
         ).text;
-        const outcome = await finish("ready", { status: "ready" }, guardedAnswer);
+        // Handle [discord-create-channel: name] markers: create the channel in
+        // the originating guild, strip the marker, append a confirmation.
+        const channelActions = await applyChannelCreateMarkers(
+          guardedAnswer,
+          record.guildId,
+          (message, meta) =>
+            params.logger.info(message, { ...safeJobLogFields(record), ...meta }),
+        );
+        const finalAnswer =
+          [channelActions.text, channelActions.note]
+            .filter((part) => part && part.trim())
+            .join("\n\n") || "Done.";
+        const outcome = await finish("ready", { status: "ready" }, finalAnswer);
 
         if (status.files?.length && params.deliverFiles) {
           await params.deliverFiles(status.files).catch(async () => {

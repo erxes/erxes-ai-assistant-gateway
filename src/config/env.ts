@@ -51,6 +51,14 @@ export const env = {
     1800,
   ),
   OPENCLAW_SHARED_SECRET: process.env.OPENCLAW_SHARED_SECRET ?? "",
+  // Delivery-only token for the cron->channel webhook. Separate from the runtime
+  // shared secret so a model emitting it in a cron URL can't leak real config.
+  CRON_WEBHOOK_SECRET: process.env.CRON_WEBHOOK_SECRET ?? "",
+  // Which assistants get converted spreadsheets as a .csv FILE attachment (needs
+  // the runtime adapter to allow the gateway host). "all"/"*" = everyone, a
+  // comma-list = those assistantIds, empty = none (inline-text fallback).
+  SPREADSHEET_CSV_FILE_ASSISTANTS:
+    process.env.SPREADSHEET_CSV_FILE_ASSISTANTS ?? "",
   ASSISTANT_JOB_POLL_INTERVAL_MS: toNumber(
     process.env.ASSISTANT_JOB_POLL_INTERVAL_MS,
     5_000,

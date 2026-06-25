@@ -37,10 +37,17 @@ import {
 
 import {
   attachmentRejectionMessage,
+  MAX_ATTACHMENTS,
   normalizeDiscordAttachments,
   skippedAttachmentsNote,
   type RawDiscordAttachment,
 } from "./attachments.js";
+import {
+  extractSpreadsheetText,
+  extractTextFile,
+  isInlineTextAttachment,
+  isSpreadsheetAttachment,
+} from "./spreadsheets.js";
 
 type MessageGatewayStatus = {
   enabled: boolean;
@@ -303,6 +310,7 @@ const getRawAttachments = (message: Message): RawDiscordAttachment[] =>
     url: attachment.url,
   }));
 
+
 export const handleDiscordMessage = async (
   message: Message,
   deps: MessageGatewayDeps,
@@ -346,10 +354,51 @@ export const handleDiscordMessage = async (
     threadId: target.threadId,
   });
 
-  const { supported: attachments, skipped } = normalizeDiscordAttachments(
-    getRawAttachments(message),
+  const rawAttachments = getRawAttachments(message);
+  // The model reads INLINE text reliably but treats file attachments
+  // (input_file) inconsistently. So spreadsheets (converted xlsx->CSV) AND text
+  // files (csv/txt/md/json/html/…) are inlined into the prompt; only PDFs and
+  // images are passed through as real attachments.
+  const inlineRaw = rawAttachments.filter(
+    (a) =>
+      isSpreadsheetAttachment(a.filename, a.contentType) ||
+      isInlineTextAttachment(a.filename, a.contentType),
   );
-  const question = message.content.trim();
+  const { supported: attachments, skipped } = normalizeDiscordAttachments(
+    rawAttachments.filter(
+      (a) =>
+        !isSpreadsheetAttachment(a.filename, a.contentType) &&
+        !isInlineTextAttachment(a.filename, a.contentType),
+    ),
+  );
+  let question = message.content.trim();
+
+  if (inlineRaw.length > 0) {
+    const parts: string[] = [];
+    for (const a of inlineRaw.slice(0, MAX_ATTACHMENTS)) {
+      const text = isSpreadsheetAttachment(a.filename, a.contentType)
+        ? await extractSpreadsheetText({
+            filename: a.filename ?? "spreadsheet",
+            url: a.url ?? "",
+            contentType: a.contentType,
+            size: Number(a.size) || 0,
+          })
+        : await extractTextFile({
+            filename: a.filename ?? "file",
+            url: a.url ?? "",
+            size: Number(a.size) || 0,
+          });
+      if (text) parts.push(text);
+    }
+    const joined = parts.join("\n\n");
+    if (joined) question = [question, joined].filter(Boolean).join("\n\n");
+    deps.logger.info("Discord file attachments inlined", {
+      guildId,
+      assistantId: binding.assistantId,
+      count: inlineRaw.length,
+      chars: joined.length,
+    });
+  }
 
   // Layer 1: deny protected-file/config disclosure requests before OpenClaw.
   const inboundDetection = detectProtectedFileRequest(question);
