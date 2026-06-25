@@ -8,7 +8,10 @@ import type {
 } from "../openclaw/client.js";
 import { splitDiscordMessage } from "./messageGateway.js";
 import { guardOutboundText } from "../security/secretGuard.js";
-import { applyChannelCreateMarkers } from "./channelActions.js";
+import {
+  applyChannelCreateMarkers,
+  applyChannelPostMarkers,
+} from "./channelActions.js";
 import {
   buildReferenceId,
   categorizeError,
@@ -308,16 +311,24 @@ export const runDiscordAssistantJob = async (
         const guardedAnswer = guardOutboundText(
           status.answer || "The operation finished, but no result text was returned.",
         ).text;
-        // Handle [discord-create-channel: name] markers: create the channel in
-        // the originating guild, strip the marker, append a confirmation.
-        const channelActions = await applyChannelCreateMarkers(
+        const log = (message: string, meta?: Record<string, unknown>) =>
+          params.logger.info(message, { ...safeJobLogFields(record), ...meta });
+        // [discord-create-channel: name] — create channels in the originating guild.
+        const created = await applyChannelCreateMarkers(
           guardedAnswer,
           record.guildId,
-          (message, meta) =>
-            params.logger.info(message, { ...safeJobLogFields(record), ...meta }),
+          log,
+        );
+        // [discord-post-channel: target] … [/discord-post-channel] — post content
+        // into a specific channel in this assistant's own guild (run AFTER create
+        // so a channel made this turn is resolvable by name).
+        const posted = await applyChannelPostMarkers(
+          created.text,
+          record.assistantId,
+          log,
         );
         const finalAnswer =
-          [channelActions.text, channelActions.note]
+          [posted.text, created.note, posted.note]
             .filter((part) => part && part.trim())
             .join("\n\n") || "Done.";
         const outcome = await finish("ready", { status: "ready" }, finalAnswer);
