@@ -9,6 +9,8 @@ import { adminBindingsRouter } from "./routes/adminBindings.js";
 import { adminInstallationsRouter } from "./routes/adminInstallations.js";
 import { discordInteractionsRouter } from "./routes/discordInteractions.js";
 import { discordOAuthRouter } from "./routes/discordOAuth.js";
+import { cronWebhookRouter } from "./routes/cronWebhook.js";
+import { convertedFilesRouter } from "./routes/convertedFiles.js";
 import { healthRouter } from "./routes/health.js";
 import { mockOpenClawRouter } from "./routes/mockOpenClaw.js";
 
@@ -27,6 +29,8 @@ export const createApp = () => {
   app.use(express.json({ limit: "1mb" }));
 
   app.use("/discord/oauth", discordOAuthRouter);
+  app.use("/webhooks", cronWebhookRouter);
+  app.use("/internal/converted", convertedFilesRouter);
   app.use("/api/installations", adminInstallationsRouter);
   app.use("/api/bindings", adminBindingsRouter);
 
