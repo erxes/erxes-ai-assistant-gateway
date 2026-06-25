@@ -1,4 +1,10 @@
-import { createGuildChannel } from "./api.js";
+import {
+  createGuildChannel,
+  getDiscordChannel,
+  getDiscordGuildChannels,
+  sendChannelMessage,
+} from "./api.js";
+import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
 
 // The model can ask the gateway to create a Discord channel by emitting a marker
 // in its answer, e.g.  [discord-create-channel: project updates]
@@ -43,13 +49,32 @@ export const applyChannelCreateMarkers = async (
     return { text: stripped, note: "" };
   }
 
+  // Idempotent: reuse an existing channel of the same name instead of making a
+  // duplicate. (Discord allows same-named channels, so without this each run
+  // piles up empty clones.)
+  const existing: Array<{ id: string; name?: string }> = [];
+  try {
+    existing.push(...(await getDiscordGuildChannels(guildId)));
+  } catch {
+    /* fall back to create-only if the list fails */
+  }
+
   const created: string[] = [];
+  const reused: string[] = [];
   const failed: string[] = [];
   for (const match of matches.slice(0, MAX_CHANNELS_PER_MESSAGE)) {
     const name = sanitizeChannelName(match[1] ?? "");
+    const found = existing.find((c) => (c.name || "").toLowerCase() === name);
+    if (found) {
+      reused.push(`<#${found.id}>`);
+      log?.("discord channel reused", { guildId, name, channelId: found.id });
+      continue;
+    }
     try {
       const channel = await createGuildChannel(guildId, name);
       created.push(`<#${channel.id}>`);
+      // so a second marker with the same name this turn reuses it too
+      existing.push({ id: channel.id, name });
       log?.("discord channel created", { guildId, name, channelId: channel.id });
     } catch (error) {
       failed.push(name);
@@ -67,8 +92,138 @@ export const applyChannelCreateMarkers = async (
       `✅ Created channel${created.length > 1 ? "s" : ""}: ${created.join(", ")}`,
     );
   }
+  if (reused.length > 0) {
+    parts.push(
+      `↪️ Using existing channel${reused.length > 1 ? "s" : ""}: ${reused.join(", ")}`,
+    );
+  }
   if (failed.length > 0) {
     parts.push(`⚠️ Couldn't create: ${failed.join(", ")}`);
   }
+  return { text: stripped, note: parts.join("\n") };
+};
+
+// The model can post content INTO a specific channel (not just the one it was
+// messaged from) with a block marker:
+//   [discord-post-channel: <channel name or id>]
+//   ...content (any length)...
+//   [/discord-post-channel]
+// The gateway resolves the target to a channel in THIS assistant's own guild,
+// posts the content (chunked under Discord's 2000-char limit), and strips the
+// block. Lets a coordinator/main agent drop each subagent's work into its channel.
+const POST_CHANNEL_BLOCK_RE =
+  /\[discord-post-channel:\s*([^\]\n]+?)\s*\]\s*\n?([\s\S]*?)\[\/discord-post-channel\]/gi;
+const MAX_POST_CHUNKS = 12;
+const POST_CHUNK_CHARS = 1900;
+
+const chunkForDiscord = (text: string): string[] => {
+  const out: string[] = [];
+  let rest = text.trim();
+  while (rest.length > 0 && out.length < MAX_POST_CHUNKS) {
+    if (rest.length <= POST_CHUNK_CHARS) {
+      out.push(rest);
+      break;
+    }
+    let cut = rest.lastIndexOf("\n", POST_CHUNK_CHARS);
+    if (cut < POST_CHUNK_CHARS * 0.5) cut = POST_CHUNK_CHARS;
+    out.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  return out;
+};
+
+export const applyChannelPostMarkers = async (
+  answer: string,
+  assistantId: string,
+  log?: (message: string, meta?: Record<string, unknown>) => void,
+): Promise<ChannelActionResult> => {
+  const text = String(answer ?? "");
+  const matches = [...text.matchAll(POST_CHANNEL_BLOCK_RE)];
+  if (matches.length === 0) {
+    return { text, note: "" };
+  }
+
+  const stripped = text
+    .replace(POST_CHANNEL_BLOCK_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // The guild(s) this assistant is bound to — never post outside its own server.
+  const bindings = await DiscordAssistantBinding.find({
+    assistantId,
+    enabled: true,
+  })
+    .select("discordGuildId")
+    .lean();
+  const guilds = [
+    ...new Set(bindings.map((b) => b.discordGuildId).filter(Boolean) as string[]),
+  ];
+  if (guilds.length === 0) {
+    log?.("post-channel: assistant has no active binding");
+    return { text: stripped, note: "" };
+  }
+
+  const channelCache = new Map<string, Array<{ id: string; name?: string }>>();
+  const listGuild = async (g: string) => {
+    if (!channelCache.has(g)) {
+      try {
+        channelCache.set(g, await getDiscordGuildChannels(g));
+      } catch {
+        channelCache.set(g, []);
+      }
+    }
+    return channelCache.get(g) as Array<{ id: string; name?: string }>;
+  };
+  const resolveChannel = async (target: string): Promise<string | null> => {
+    const t = target.trim().replace(/^#/, "");
+    if (/^\d{5,25}$/.test(t)) {
+      try {
+        const ch = await getDiscordChannel(t);
+        if (ch.guild_id && guilds.includes(ch.guild_id)) return t;
+      } catch {
+        /* not found */
+      }
+      return null;
+    }
+    const norm = t.toLowerCase().replace(/\s+/g, "-");
+    for (const g of guilds) {
+      const found = (await listGuild(g)).find(
+        (c) => (c.name || "").toLowerCase() === norm,
+      );
+      if (found) return found.id;
+    }
+    return null;
+  };
+
+  const posted: string[] = [];
+  const failed: string[] = [];
+  for (const m of matches) {
+    const target = m[1] ?? "";
+    const content = (m[2] ?? "").trim();
+    if (!content) continue;
+    const channelId = await resolveChannel(target);
+    if (!channelId) {
+      failed.push(target.trim());
+      log?.("post-channel: target not found in assistant guild", { target });
+      continue;
+    }
+    try {
+      for (const chunk of chunkForDiscord(content)) {
+        await sendChannelMessage(channelId, chunk);
+      }
+      posted.push(`<#${channelId}>`);
+      log?.("post-channel: posted", { assistantId, channelId });
+    } catch (error) {
+      failed.push(target.trim());
+      log?.("post-channel: failed", {
+        target,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const parts: string[] = [];
+  if (posted.length > 0) parts.push(`✅ Posted to ${posted.join(", ")}`);
+  if (failed.length > 0) parts.push(`⚠️ Couldn't post to: ${failed.join(", ")}`);
   return { text: stripped, note: parts.join("\n") };
 };
