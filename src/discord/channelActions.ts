@@ -27,10 +27,18 @@ export const sanitizeChannelName = (raw: string): string =>
 
 export type ChannelActionResult = { text: string; note: string };
 
+export type ChannelBindingContext = {
+  tenantId: string;
+  assistantId: string;
+  assistantName?: string;
+  openclawUrl: string;
+};
+
 export const applyChannelCreateMarkers = async (
   answer: string,
   guildId: string | undefined,
   log?: (message: string, meta?: Record<string, unknown>) => void,
+  bindingContext?: ChannelBindingContext,
 ): Promise<ChannelActionResult> => {
   const text = String(answer ?? "");
   const matches = [...text.matchAll(CREATE_CHANNEL_MARKER_RE)];
@@ -68,6 +76,26 @@ export const applyChannelCreateMarkers = async (
     if (found) {
       reused.push(`<#${found.id}>`);
       log?.("discord channel reused", { guildId, name, channelId: found.id });
+      if (bindingContext) {
+        try {
+          await DiscordAssistantBinding.findOneAndUpdate(
+            { discordGuildId: guildId, discordChannelId: found.id },
+            {
+              $set: {
+                tenantId: bindingContext.tenantId,
+                assistantId: bindingContext.assistantId,
+                assistantName: bindingContext.assistantName,
+                openclawUrl: bindingContext.openclawUrl,
+                discordGuildId: guildId,
+                discordChannelId: found.id,
+                enabled: true,
+                responseMode: "all_messages",
+              },
+            },
+            { upsert: true },
+          );
+        } catch { /* non-fatal */ }
+      }
       continue;
     }
     try {
@@ -76,6 +104,35 @@ export const applyChannelCreateMarkers = async (
       // so a second marker with the same name this turn reuses it too
       existing.push({ id: channel.id, name });
       log?.("discord channel created", { guildId, name, channelId: channel.id });
+      // Auto-register binding so this channel routes back to this assistant.
+      if (bindingContext) {
+        try {
+          await DiscordAssistantBinding.findOneAndUpdate(
+            { discordGuildId: guildId, discordChannelId: channel.id },
+            {
+              $set: {
+                tenantId: bindingContext.tenantId,
+                assistantId: bindingContext.assistantId,
+                assistantName: bindingContext.assistantName,
+                openclawUrl: bindingContext.openclawUrl,
+                discordGuildId: guildId,
+                discordChannelId: channel.id,
+                enabled: true,
+                responseMode: "all_messages",
+              },
+            },
+            { upsert: true },
+          );
+          log?.("discord channel binding upserted", { guildId, name, channelId: channel.id });
+        } catch (bindErr) {
+          log?.("discord channel binding failed (non-fatal)", {
+            guildId,
+            name,
+            channelId: channel.id,
+            error: bindErr instanceof Error ? bindErr.message : String(bindErr),
+          });
+        }
+      }
     } catch (error) {
       failed.push(name);
       log?.("discord create-channel failed", {
@@ -136,6 +193,7 @@ export const applyChannelPostMarkers = async (
   answer: string,
   assistantId: string,
   log?: (message: string, meta?: Record<string, unknown>) => void,
+  bindingContext?: ChannelBindingContext,
 ): Promise<ChannelActionResult> => {
   const text = String(answer ?? "");
   const matches = [...text.matchAll(POST_CHANNEL_BLOCK_RE)];

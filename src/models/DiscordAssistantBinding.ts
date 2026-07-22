@@ -38,6 +38,8 @@ discordAssistantBindingSchema.index({
   discordGuildId: 1,
 });
 
+discordAssistantBindingSchema.index({ openclawUrl: 1 });
+
 export type DiscordAssistantBindingDocument = InferSchemaType<
   typeof discordAssistantBindingSchema
 >;
