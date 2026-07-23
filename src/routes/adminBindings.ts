@@ -156,9 +156,8 @@ adminBindingsRouter.post(
 
     const binding = await DiscordAssistantBinding.findOneAndUpdate(
       {
-        tenantId: input.tenantId,
-        assistantId: input.assistantId,
         discordGuildId: input.discordGuildId,
+        discordChannelId: input.discordChannelId,
       },
       {
         $set: {

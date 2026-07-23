@@ -11,6 +11,7 @@ import { guardOutboundText } from "../security/secretGuard.js";
 import {
   applyChannelCreateMarkers,
   applyChannelPostMarkers,
+  type ChannelBindingContext,
 } from "./channelActions.js";
 import {
   buildReferenceId,
@@ -314,10 +315,16 @@ export const runDiscordAssistantJob = async (
         const log = (message: string, meta?: Record<string, unknown>) =>
           params.logger.info(message, { ...safeJobLogFields(record), ...meta });
         // [discord-create-channel: name] — create channels in the originating guild.
+        const channelBindingCtx: ChannelBindingContext = {
+          tenantId: record.tenantId,
+          assistantId: record.assistantId,
+          openclawUrl: record.openclawUrl,
+        };
         const created = await applyChannelCreateMarkers(
           guardedAnswer,
           record.guildId,
           log,
+          channelBindingCtx,
         );
         // [discord-post-channel: target] … [/discord-post-channel] — post content
         // into a specific channel in this assistant's own guild (run AFTER create
