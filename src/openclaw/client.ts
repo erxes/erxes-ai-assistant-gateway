@@ -48,41 +48,68 @@ type FlexibleOpenClawResponse = {
 const normalizeOpenClawUrl = (openclawUrl: string) =>
   openclawUrl.replace(/\/+$/, "");
 
-// Transient connect-level failures (pod restarting / cold start / ingress
-// 502/503 / "fetch failed") surface as runtime_unreachable. Retry only those a
-// few times with backoff so a brief blip doesn't fail the whole Discord
-// request. Never retry timeouts, provider rate limits (429), or tool failures —
-// retrying those would duplicate real work or hammer the provider.
-const RUNTIME_RETRY_ATTEMPTS = 3;
-const RUNTIME_RETRY_BASE_MS = 800;
+// Retry schedule for transient runtime failures. The old policy (3 attempts,
+// 800ms base, unreachable-only) gave up in 2.4s — far short of the 60–120s a
+// deployer-initiated pod restart takes — and never retried 429/500 at all,
+// which a 7-day failure census showed were the top two customer-visible
+// failure causes. Total patience here ≈ 3.5 minutes.
+export const RUNTIME_RETRY_SCHEDULE_MS = [
+  5_000, 15_000, 30_000, 60_000, 90_000,
+];
 
-const isRetryableRuntimeError = (error: unknown): boolean =>
-  error instanceof OpenClawRuntimeError &&
-  error.category === "runtime_unreachable";
+// 429 is the runtime's own busy signal (gateway concurrency), not a provider
+// rate limit — spaced backoff is the correct response. 500 gets at most two
+// retries: it can follow a mid-turn pod death (recoverable) but may also mean
+// the turn partially executed, so we cap duplicate side-effect exposure.
+// Timeouts are never retried — re-running long work compounds the problem.
+export const shouldRetryRuntimeError = (
+  error: unknown,
+  attempt: number,
+): boolean => {
+  if (!(error instanceof OpenClawRuntimeError)) return false;
+  if (error.category === "runtime_unreachable") return true;
+  if (error.status === 429) return true;
+  if (error.status === 500 && attempt < 2) return true;
+  return false;
+};
 
-const withRuntimeRetry = async <T>(fn: () => Promise<T>): Promise<T> => {
-  let lastError: unknown;
+export type RuntimeRetryInfo = {
+  attempt: number;
+  delayMs: number;
+  error: unknown;
+};
 
-  for (let attempt = 0; attempt < RUNTIME_RETRY_ATTEMPTS; attempt++) {
+export type RuntimeRetryOptions = {
+  onRetry?: (info: RuntimeRetryInfo) => void;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export const withRuntimeRetry = async <T>(
+  fn: () => Promise<T>,
+  options: RuntimeRetryOptions = {},
+): Promise<T> => {
+  const sleep =
+    options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      lastError = error;
+      const delayMs = RUNTIME_RETRY_SCHEDULE_MS[attempt];
 
-      if (
-        !isRetryableRuntimeError(error) ||
-        attempt === RUNTIME_RETRY_ATTEMPTS - 1
-      ) {
+      if (delayMs === undefined || !shouldRetryRuntimeError(error, attempt)) {
         throw error;
       }
 
-      await new Promise((resolve) =>
-        setTimeout(resolve, RUNTIME_RETRY_BASE_MS * 2 ** attempt),
-      );
+      try {
+        options.onRetry?.({ attempt: attempt + 1, delayMs, error });
+      } catch {
+        // A broken notify hook must never break the retry loop itself.
+      }
+      await sleep(delayMs);
     }
   }
-
-  throw lastError;
 };
 
 export type RuntimeGeneratedFile = {
@@ -194,8 +221,9 @@ const askOpenClawAssistantOnce = async (
 
 export const askOpenClawAssistant = (
   input: AskAssistantInput,
+  retryOptions?: RuntimeRetryOptions,
 ): Promise<AssistantAskResult> =>
-  withRuntimeRetry(() => askOpenClawAssistantOnce(input));
+  withRuntimeRetry(() => askOpenClawAssistantOnce(input), retryOptions);
 
 const MAX_RUNTIME_FILE_DOWNLOAD_BYTES = 9 * 1024 * 1024;
 
@@ -288,8 +316,9 @@ const startOpenClawAssistantJobOnce = async (
 
 export const startOpenClawAssistantJob = (
   input: AskAssistantInput & { jobKey: string },
+  retryOptions?: RuntimeRetryOptions,
 ): Promise<AssistantRuntimeJob> =>
-  withRuntimeRetry(() => startOpenClawAssistantJobOnce(input));
+  withRuntimeRetry(() => startOpenClawAssistantJobOnce(input), retryOptions);
 
 export const getOpenClawAssistantJob = async (
   openclawUrl: string,

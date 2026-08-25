@@ -164,6 +164,19 @@ export const friendlyRuntimeErrorMessage = (
     return `${error.safeMessage} (ref ${referenceId})`;
   }
 
+  // Auth failures are a billing/key problem, not a technical one — say so.
+  // Kimi returns 401 for expired keys AND lapsed memberships alike.
+  if (
+    error instanceof OpenClawRuntimeError &&
+    (error.status === 401 || error.status === 402)
+  ) {
+    return (
+      "The assistant's AI provider key isn't working — usually an expired key or a lapsed plan. " +
+      "The workspace admin can fix this by renewing the plan or updating the key in erxes. " +
+      `(ref ${referenceId})`
+    );
+  }
+
   let message = CATEGORY_MESSAGES[category];
 
   if (
