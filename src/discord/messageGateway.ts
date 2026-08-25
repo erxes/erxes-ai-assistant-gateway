@@ -48,6 +48,10 @@ import {
   isInlineTextAttachment,
   isSpreadsheetAttachment,
 } from "./spreadsheets.js";
+import {
+  extractPresentationText,
+  isPresentationAttachment,
+} from "./presentations.js";
 
 type MessageGatewayStatus = {
   enabled: boolean;
@@ -362,12 +366,14 @@ export const handleDiscordMessage = async (
   const inlineRaw = rawAttachments.filter(
     (a) =>
       isSpreadsheetAttachment(a.filename, a.contentType) ||
+      isPresentationAttachment(a.filename, a.contentType) ||
       isInlineTextAttachment(a.filename, a.contentType),
   );
   const { supported: attachments, skipped } = normalizeDiscordAttachments(
     rawAttachments.filter(
       (a) =>
         !isSpreadsheetAttachment(a.filename, a.contentType) &&
+        !isPresentationAttachment(a.filename, a.contentType) &&
         !isInlineTextAttachment(a.filename, a.contentType),
     ),
   );
@@ -379,6 +385,13 @@ export const handleDiscordMessage = async (
       const text = isSpreadsheetAttachment(a.filename, a.contentType)
         ? await extractSpreadsheetText({
             filename: a.filename ?? "spreadsheet",
+            url: a.url ?? "",
+            contentType: a.contentType,
+            size: Number(a.size) || 0,
+          })
+        : isPresentationAttachment(a.filename, a.contentType)
+        ? await extractPresentationText({
+            filename: a.filename ?? "presentation",
             url: a.url ?? "",
             contentType: a.contentType,
             size: Number(a.size) || 0,
@@ -573,7 +586,30 @@ export const handleDiscordMessage = async (
       void channel.sendTyping?.().catch(() => undefined);
     }, TYPING_REFRESH_INTERVAL_MS);
 
-    const result = await deps.askAssistant(askInput);
+    // On the second retry (≥20s of waiting) tell the user we're on it — a
+    // busy/restarting runtime otherwise looks like being ignored.
+    let retryNoticeSent = false;
+    const result = await deps.askAssistant(askInput, {
+      onRetry: ({ attempt }) => {
+        deps.logger.info("Discord ask retrying against runtime", {
+          guildId,
+          channelId,
+          messageId: message.id,
+          assistantId: binding.assistantId,
+          attempt,
+        });
+        if (attempt === 2 && !retryNoticeSent) {
+          retryNoticeSent = true;
+          void channel
+            .send?.({
+              content:
+                "The assistant is busy or restarting — retrying automatically, hang on.",
+              allowedMentions: { repliedUser: false },
+            })
+            .catch(() => undefined);
+        }
+      },
+    });
     const askResult =
       typeof result === "string"
         ? { answer: result, files: [], fileErrors: [] }

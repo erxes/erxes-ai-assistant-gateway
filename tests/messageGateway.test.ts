@@ -358,3 +358,28 @@ test("buildDiscordConversationId is stable for channels and threads", () => {
     "discord:g:c:t",
   );
 });
+
+test("ask retry wiring: second retry posts one notice and the answer still arrives", async () => {
+  const fixture = createMessage();
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined, info: () => undefined } as any,
+    findBinding: async () => createBinding(),
+    askAssistant: async (_input, retryOptions?: any) => {
+      assert.ok(retryOptions?.onRetry, "messageGateway must thread onRetry");
+      // Simulate what withRuntimeRetry reports on the 1st and 2nd retry.
+      retryOptions.onRetry({ attempt: 1, delayMs: 5_000, error: new Error("x") });
+      retryOptions.onRetry({ attempt: 2, delayMs: 15_000, error: new Error("x") });
+      retryOptions.onRetry({ attempt: 2, delayMs: 15_000, error: new Error("x") });
+      return "recovered answer";
+    },
+  });
+
+  const notices = fixture.sends.filter((s: any) =>
+    /retrying automatically/.test(s?.content ?? ""),
+  );
+  assert.equal(notices.length, 1, "exactly one retry notice");
+  assert.deepEqual(fixture.replies, [
+    { content: "recovered answer", allowedMentions: { repliedUser: false } },
+  ]);
+});
