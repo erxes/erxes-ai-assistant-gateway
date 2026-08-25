@@ -12,6 +12,7 @@ import {
   summarizeOperation,
 } from "../src/discord/longOps.js";
 import { handleDiscordMessage } from "../src/discord/messageGateway.js";
+import { OpenClawRuntimeError } from "../src/openclaw/errors.js";
 
 const record: AssistantJobRecord = {
   tenantId: "tenant-1",
@@ -602,4 +603,109 @@ test("long operations keep the immediate 'Started' ack through the new options",
   });
 
   assert.deepEqual(acks, ["Started. I'll post progress here."]);
+});
+
+test("survives a pod restart: >12 unreachable polls then recovery still delivers", async () => {
+  const { store } = createMemoryStore();
+  const notifications: string[] = [];
+  let polls = 0;
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async () => undefined,
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => {
+      polls += 1;
+      if (polls <= 20) {
+        throw new OpenClawRuntimeError("status 503", {
+          category: "runtime_unreachable",
+          status: 503,
+        });
+      }
+      return { id: "job-1", status: "ready" as const, answer: "made it" };
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 60_000,
+    sleep: async () => undefined,
+  });
+
+  assert.equal(outcome, "ready");
+  assert.ok(polls > 12, "must poll past the old 12-error limit");
+  assert.ok(
+    notifications.some((n) => /made it/.test(n)),
+    "answer delivered after recovery",
+  );
+});
+
+test("resubmits when the runtime lost the job (404 after restart) and delivers", async () => {
+  const { store } = createMemoryStore();
+  const notifications: string[] = [];
+  const startedKeys: string[] = [];
+  let polls = 0;
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async () => undefined,
+    notify: async (content) => notifications.push(content),
+    startJob: async (input: any) => {
+      startedKeys.push(input.jobKey);
+      return { id: `job-${startedKeys.length}`, status: "running" as const };
+    },
+    getJob: async (_url, jobId) => {
+      polls += 1;
+      if (jobId === "job-1") {
+        throw new OpenClawRuntimeError("status 404", {
+          category: "runtime_unreachable",
+          status: 404,
+        });
+      }
+      return { id: jobId, status: "ready" as const, answer: "second life" };
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 60_000,
+    sleep: async () => undefined,
+  });
+
+  assert.equal(outcome, "ready");
+  assert.deepEqual(startedKeys, [record.idempotencyKey, record.idempotencyKey]);
+  assert.ok(notifications.some((n) => /second life/.test(n)));
+});
+
+test("gives up after the resubmission cap when the runtime keeps losing the job", async () => {
+  const { store } = createMemoryStore();
+  const notifications: string[] = [];
+  let starts = 0;
+
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async () => undefined,
+    notify: async (content) => notifications.push(content),
+    startJob: async () => {
+      starts += 1;
+      return { id: `job-${starts}`, status: "running" as const };
+    },
+    getJob: async () => {
+      throw new OpenClawRuntimeError("status 404", {
+        category: "runtime_unreachable",
+        status: 404,
+      });
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 60_000,
+    sleep: async () => undefined,
+  });
+
+  assert.equal(outcome, "failed");
+  assert.equal(starts, 3); // initial + 2 resubmissions
+  assert.ok(notifications.length > 0, "customer told about the failure");
 });

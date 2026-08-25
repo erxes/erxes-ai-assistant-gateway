@@ -84,6 +84,13 @@ export const DELAYED_ACK_MESSAGE =
 const MAX_CONSECUTIVE_POLL_ERRORS = 12;
 const MAX_CONSECUTIVE_JOB_NOT_FOUND = 3;
 
+// Unreachability is budgeted by TIME, not attempts: pod restarts take 60-120s
+// and 12 polls at 5s gave up at ~60s. The grace window rides out any restart;
+// the downtime is credited back to the job deadline when the runtime returns.
+const UNREACHABLE_GRACE_MS = 240_000;
+const RESTART_NOTICE_AFTER_MS = 20_000;
+const MAX_JOB_RESUBMISSIONS = 2;
+
 const safeRuntimeHost = (openclawUrl: string): string | undefined => {
   try {
     return new URL(openclawUrl).hostname;
@@ -257,7 +264,14 @@ export const runDiscordAssistantJob = async (
 
     let lastStage = "running";
     let consecutivePollErrors = 0;
-    const deadline = startedAt + timeoutMs;
+    let deadline = startedAt + timeoutMs;
+    // A deployer-initiated pod restart takes 60-120s. Count unreachability by
+    // TIME, not poll attempts — 12 polls at 5s gave up at ~60s, just short of
+    // every restart (live incident 2026-08-25). The downtime is credited back
+    // to the job deadline so waiting out a restart never causes a timeout.
+    let unreachableSince: number | null = null;
+    let restartNoticeSent = false;
+    let resubmissions = 0;
 
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs);
@@ -268,6 +282,10 @@ export const runDiscordAssistantJob = async (
       try {
         status = await getJob(record.openclawUrl, runtimeJobId);
         consecutivePollErrors = 0;
+        if (unreachableSince !== null) {
+          deadline += Date.now() - unreachableSince;
+          unreachableSince = null;
+        }
       } catch (pollError) {
         consecutivePollErrors += 1;
         const errorCategory = categorizeError(pollError);
@@ -295,7 +313,65 @@ export const runDiscordAssistantJob = async (
           httpStatus === 404 &&
           consecutivePollErrors >= MAX_CONSECUTIVE_JOB_NOT_FOUND;
 
-        if (jobGone || consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+        // The adapter keeps job state in emptyDir, so a pod restart 404s every
+        // in-flight job. The runtime lost the work — resubmit it under the same
+        // idempotency key instead of failing the customer's message.
+        if (jobGone && resubmissions < MAX_JOB_RESUBMISSIONS) {
+          try {
+            const remote = await startJob({
+              ...ask,
+              jobKey: record.idempotencyKey,
+            });
+            resubmissions += 1;
+            runtimeJobId = remote.id;
+            consecutivePollErrors = 0;
+            unreachableSince = null;
+            await store
+              .update(record.idempotencyKey, { runtimeJobId, status: "running" })
+              .catch(() => undefined);
+            params.logger.info("Discord assistant job resubmitted after runtime lost it", {
+              ...safeJobLogFields(record),
+              runtimeHost: safeRuntimeHost(record.openclawUrl),
+              runtimeJobId,
+              resubmissions,
+            });
+            continue;
+          } catch (resubmitError) {
+            params.logger.error("Discord assistant job resubmission failed", {
+              ...safeJobLogFields(record),
+              runtimeHost: safeRuntimeHost(record.openclawUrl),
+              error:
+                resubmitError instanceof Error
+                  ? resubmitError.message
+                  : String(resubmitError),
+            });
+          }
+        }
+
+        const unreachable =
+          errorCategory === "runtime_unreachable" && httpStatus !== 404;
+
+        if (unreachable) {
+          if (unreachableSince === null) unreachableSince = Date.now();
+          const downMs = Date.now() - unreachableSince;
+
+          if (downMs >= RESTART_NOTICE_AFTER_MS && !restartNoticeSent) {
+            restartNoticeSent = true;
+            await notify(
+              "The assistant is busy or restarting — retrying automatically, hang on.",
+            ).catch(() => undefined);
+          }
+
+          if (downMs < UNREACHABLE_GRACE_MS) {
+            continue;
+          }
+        }
+
+        if (
+          jobGone ||
+          unreachable ||
+          consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS
+        ) {
           const referenceId = buildReferenceId(record.messageId);
           return await finish(
             "failed",
