@@ -9,6 +9,11 @@ import {
   type DiscordAssistantResponseMode,
 } from "../models/DiscordAssistantBinding.js";
 import { DiscordInstallation } from "../models/DiscordInstallation.js";
+import {
+  disableBindingsForRuntime,
+  rehomeBindingsForRuntime,
+  runtimeUrlVariants,
+} from "../discord/bindingLifecycle.js";
 import { requireAdminSecret } from "./adminAuth.js";
 
 export const adminBindingsRouter = Router();
@@ -196,11 +201,62 @@ adminBindingsRouter.get(
       }
     }
 
+    // Lifecycle callers (transfer, delete) know only the runtime URL — the
+    // tenant/assistant ids on the binding are exactly what went stale.
+    const openclawUrl = req.query.openclawUrl;
+
+    if (typeof openclawUrl === "string" && openclawUrl.trim().length > 0) {
+      query.openclawUrl = { $in: runtimeUrlVariants(openclawUrl) };
+    }
+
     const bindings = await DiscordAssistantBinding.find(query)
       .sort({ createdAt: -1 })
       .limit(200);
 
     res.json({ bindings });
+  }),
+);
+
+// Assistant transfer: move every binding of a runtime to its new owner, and
+// make sure the new tenant has a connected installation for each guild so the
+// connection stays manageable from its UI. Chat routing never breaks either
+// way (it follows the stored URL) — this fixes ownership.
+adminBindingsRouter.post(
+  "/rehome",
+  asyncHandler(async (req, res) => {
+    if (!req.body || typeof req.body !== "object") {
+      throw badRequest("Request body must be an object");
+    }
+
+    const data = req.body as Record<string, unknown>;
+    const result = await rehomeBindingsForRuntime(
+      requiredString(data, "openclawUrl"),
+      {
+        tenantId: requiredString(data, "tenantId"),
+        assistantId: requiredString(data, "assistantId"),
+        assistantName: optionalString(data, "assistantName"),
+      },
+    );
+
+    res.json(result);
+  }),
+);
+
+// Runtime destroyed: disable its bindings so the channel unique-slot frees up
+// and customer messages stop dead-ending into a deleted namespace.
+adminBindingsRouter.post(
+  "/disable-by-url",
+  asyncHandler(async (req, res) => {
+    if (!req.body || typeof req.body !== "object") {
+      throw badRequest("Request body must be an object");
+    }
+
+    const data = req.body as Record<string, unknown>;
+    const result = await disableBindingsForRuntime(
+      requiredString(data, "openclawUrl"),
+    );
+
+    res.json(result);
   }),
 );
 
