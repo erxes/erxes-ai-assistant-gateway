@@ -6,6 +6,7 @@ import type {
   RuntimeGeneratedFile,
   startOpenClawAssistantJob,
 } from "../openclaw/client.js";
+import type { AssistantRuntimeKind } from "../runtime/identity.js";
 import { splitDiscordMessage } from "./messageGateway.js";
 import { guardOutboundText } from "../security/secretGuard.js";
 import {
@@ -25,6 +26,7 @@ type AskInput = Parameters<typeof askOpenClawAssistant>[0];
 export type AssistantJobRecord = {
   tenantId: string;
   assistantId: string;
+  runtimeKind?: AssistantRuntimeKind;
   openclawUrl: string;
   guildId: string;
   channelId: string;
@@ -280,7 +282,11 @@ export const runDiscordAssistantJob = async (
       let status: AssistantRuntimeJob | null = null;
 
       try {
-        status = await getJob(record.openclawUrl, runtimeJobId);
+        status = await getJob(record.openclawUrl, runtimeJobId, {
+          tenantId: record.tenantId,
+          assistantId: record.assistantId,
+          runtimeKind: record.runtimeKind || "openclaw",
+        });
         consecutivePollErrors = 0;
         if (unreachableSince !== null) {
           deadline += Date.now() - unreachableSince;

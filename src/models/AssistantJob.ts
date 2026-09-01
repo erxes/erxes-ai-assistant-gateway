@@ -1,4 +1,5 @@
 import { model, Schema, type InferSchemaType } from "mongoose";
+import { assistantRuntimeKinds } from "../runtime/identity.js";
 
 export const assistantJobStatuses = [
   "started",
@@ -14,6 +15,12 @@ const assistantJobSchema = new Schema(
   {
     tenantId: { type: String, required: true, trim: true },
     assistantId: { type: String, required: true, trim: true },
+    runtimeKind: {
+      type: String,
+      enum: assistantRuntimeKinds,
+      required: true,
+      default: "openclaw",
+    },
     openclawUrl: { type: String, required: true, trim: true },
     guildId: { type: String, required: true, trim: true },
     channelId: { type: String, required: true, trim: true },

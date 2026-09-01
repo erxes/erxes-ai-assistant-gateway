@@ -21,9 +21,11 @@ import {
   type LongOperationJobRequest,
 } from "./messageGateway.js";
 import { SECRET_REFUSAL_MESSAGE } from "../security/secretGuard.js";
+import type { RuntimeIdentity } from "../runtime/identity.js";
 
 const buildDeliverFiles = (
   openclawUrl: string,
+  identity: RuntimeIdentity,
   sendFiles?: (caption: string, files: DiscordFilePayload[]) => Promise<unknown>,
 ) => {
   if (!sendFiles) {
@@ -34,7 +36,7 @@ const buildDeliverFiles = (
     const { payloads, failed, blocked } = await buildRuntimeFilePayloads(
       openclawUrl,
       files,
-      downloadRuntimeGeneratedFile,
+      (url, fileId) => downloadRuntimeGeneratedFile(url, fileId, identity),
     );
 
     if (payloads.length > 0) {
@@ -69,6 +71,7 @@ export const launchDiscordLongOperationJob = async (
     record: {
       tenantId: request.ask.tenantId,
       assistantId: request.ask.assistantId,
+      runtimeKind: request.ask.runtimeKind || "openclaw",
       openclawUrl: request.ask.openclawUrl,
       guildId: request.guildId,
       channelId: request.channelId,
@@ -90,7 +93,11 @@ export const launchDiscordLongOperationJob = async (
     ackMode: request.ackMode,
     ackDelayMs: request.ackDelayMs ?? env.ASSISTANT_NORMAL_CHAT_ACK_DELAY_MS,
     quiet: request.quiet,
-    deliverFiles: buildDeliverFiles(request.ask.openclawUrl, request.sendFiles),
+    deliverFiles: buildDeliverFiles(
+      request.ask.openclawUrl,
+      request.ask,
+      request.sendFiles,
+    ),
     ...jobSettings(),
     ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}),
   });
@@ -158,6 +165,7 @@ export const resumeStaleAssistantJobs = async (client: Client) => {
       record: {
         tenantId: job.tenantId,
         assistantId: job.assistantId,
+        runtimeKind: job.runtimeKind || "openclaw",
         openclawUrl: job.openclawUrl,
         guildId: job.guildId,
         channelId: job.channelId,
@@ -172,6 +180,7 @@ export const resumeStaleAssistantJobs = async (client: Client) => {
         openclawUrl: job.openclawUrl,
         tenantId: job.tenantId,
         assistantId: job.assistantId,
+        runtimeKind: job.runtimeKind || "openclaw",
         question: "",
         user: { id: "system", username: "system" },
         discord: { guildId: job.guildId, channelId: job.channelId },
@@ -183,7 +192,15 @@ export const resumeStaleAssistantJobs = async (client: Client) => {
       getJob: getOpenClawAssistantJob,
       logger,
       runtimeJobId: job.runtimeJobId as string,
-      deliverFiles: buildDeliverFiles(job.openclawUrl, sendFiles),
+      deliverFiles: buildDeliverFiles(
+        job.openclawUrl,
+        {
+          tenantId: job.tenantId,
+          assistantId: job.assistantId,
+          runtimeKind: job.runtimeKind || "openclaw",
+        },
+        sendFiles,
+      ),
       ...jobSettings(),
     }).catch((error) => {
       logger.error("Resumed assistant job failed", {

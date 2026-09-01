@@ -1,14 +1,20 @@
 import { env } from "../config/env.js";
 import {
+  buildRuntimeIdentityHeaders,
+  type AssistantRuntimeKind,
+  type RuntimeIdentity,
+} from "../runtime/identity.js";
+import {
   OpenClawRuntimeError,
   runtimeErrorFromNetworkFailure,
   runtimeErrorFromResponse,
 } from "./errors.js";
 
-type AskAssistantInput = {
+export type AskAssistantInput = {
   openclawUrl: string;
   tenantId: string;
   assistantId: string;
+  runtimeKind?: AssistantRuntimeKind;
   question: string;
   user: {
     id: string;
@@ -56,6 +62,27 @@ const normalizeOpenClawUrl = (openclawUrl: string) =>
 export const RUNTIME_RETRY_SCHEDULE_MS = [
   5_000, 15_000, 30_000, 60_000, 90_000,
 ];
+
+const runtimeSecretHeaders = (): Record<string, string> =>
+  env.OPENCLAW_SHARED_SECRET
+    ? { "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET }
+    : {};
+
+const runtimeRequestHeaders = (
+  identity: RuntimeIdentity | undefined,
+  method: string,
+  path: string,
+) => ({
+  ...runtimeSecretHeaders(),
+  ...(identity
+    ? buildRuntimeIdentityHeaders({
+        identity,
+        method,
+        path,
+        sharedSecret: env.OPENCLAW_SHARED_SECRET,
+      })
+    : {}),
+});
 
 // 429 is the runtime's own busy signal (gateway concurrency), not a provider
 // rate limit — spaced backoff is the correct response. 500 gets at most two
@@ -166,23 +193,21 @@ const askOpenClawAssistantOnce = async (
   input: AskAssistantInput,
 ): Promise<AssistantAskResult> => {
   let response: Response;
+  const path = "/api/erxes-ai-assistant/ask";
 
   try {
     response = await fetch(
-      `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask`,
+      `${normalizeOpenClawUrl(input.openclawUrl)}${path}`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(env.OPENCLAW_SHARED_SECRET
-            ? {
-                "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET,
-              }
-            : {}),
+          ...runtimeRequestHeaders(input, "POST", path),
         },
         body: JSON.stringify({
           tenantId: input.tenantId,
           assistantId: input.assistantId,
+          runtimeKind: input.runtimeKind || "openclaw",
           question: input.question,
           user: input.user,
           discord: input.discord,
@@ -230,15 +255,17 @@ const MAX_RUNTIME_FILE_DOWNLOAD_BYTES = 9 * 1024 * 1024;
 export const downloadRuntimeGeneratedFile = async (
   openclawUrl: string,
   fileId: string,
+  identity?: RuntimeIdentity,
 ): Promise<Buffer> => {
   if (!/^[a-f0-9-]{36}$/.test(fileId)) {
     throw new Error("Invalid runtime file id");
   }
 
+  const path = `/api/erxes-ai-assistant/internal/files/${fileId}`;
   const response = await fetch(
-    `${normalizeOpenClawUrl(openclawUrl)}/api/erxes-ai-assistant/internal/files/${fileId}`,
+    `${normalizeOpenClawUrl(openclawUrl)}${path}`,
     {
-      headers: { ...runtimeSecretHeaders() },
+      headers: runtimeRequestHeaders(identity, "GET", path),
       signal: AbortSignal.timeout(60_000),
     },
   );
@@ -270,28 +297,25 @@ export type AssistantRuntimeJob = {
   duplicate?: boolean;
 };
 
-const runtimeSecretHeaders = (): Record<string, string> =>
-  env.OPENCLAW_SHARED_SECRET
-    ? { "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET }
-    : {};
-
 const startOpenClawAssistantJobOnce = async (
   input: AskAssistantInput & { jobKey: string },
 ): Promise<AssistantRuntimeJob> => {
   let response: Response;
+  const path = "/api/erxes-ai-assistant/ask-async";
 
   try {
     response = await fetch(
-      `${normalizeOpenClawUrl(input.openclawUrl)}/api/erxes-ai-assistant/ask-async`,
+      `${normalizeOpenClawUrl(input.openclawUrl)}${path}`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...runtimeSecretHeaders(),
+          ...runtimeRequestHeaders(input, "POST", path),
         },
         body: JSON.stringify({
           tenantId: input.tenantId,
           assistantId: input.assistantId,
+          runtimeKind: input.runtimeKind || "openclaw",
           question: input.question,
           user: input.user,
           discord: input.discord,
@@ -323,14 +347,16 @@ export const startOpenClawAssistantJob = (
 export const getOpenClawAssistantJob = async (
   openclawUrl: string,
   jobId: string,
+  identity?: RuntimeIdentity,
 ): Promise<AssistantRuntimeJob> => {
   let response: Response;
+  const path = `/api/erxes-ai-assistant/jobs/${encodeURIComponent(jobId)}`;
 
   try {
     response = await fetch(
-      `${normalizeOpenClawUrl(openclawUrl)}/api/erxes-ai-assistant/jobs/${encodeURIComponent(jobId)}`,
+      `${normalizeOpenClawUrl(openclawUrl)}${path}`,
       {
-        headers: { ...runtimeSecretHeaders() },
+        headers: runtimeRequestHeaders(identity, "GET", path),
         signal: AbortSignal.timeout(20_000),
       },
     );

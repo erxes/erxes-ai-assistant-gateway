@@ -94,6 +94,23 @@ test("all_messages binding matches a normal user message", async () => {
   ]);
 });
 
+test("Hermes bindings preserve their runtime isolation kind", async () => {
+  const fixture = createMessage();
+
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => createBinding({ runtimeKind: "hermes" }),
+    askAssistant: async (input) => {
+      assert.equal(input.runtimeKind, "hermes");
+      assert.equal(input.tenantId, "tenant-1");
+      assert.equal(input.assistantId, "assistant-1");
+      return "isolated reply";
+    },
+  });
+
+  assert.equal((fixture.replies[0] as any).content, "isolated reply");
+});
+
 test("slash_only binding ignores a normal user message", async () => {
   const fixture = createMessage();
 

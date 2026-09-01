@@ -1,4 +1,5 @@
 import { model, Schema, type InferSchemaType } from "mongoose";
+import { assistantRuntimeKinds } from "../runtime/identity.js";
 
 export const discordAssistantResponseModes = [
   "slash_only",
@@ -16,6 +17,12 @@ const discordAssistantBindingSchema = new Schema(
     discordGuildId: { type: String, required: true, trim: true },
     discordChannelId: { type: String, required: true, trim: true },
     openclawUrl: { type: String, required: true, trim: true },
+    runtimeKind: {
+      type: String,
+      enum: assistantRuntimeKinds,
+      required: true,
+      default: "openclaw",
+    },
     enabled: { type: Boolean, required: true, default: true },
     responseMode: {
       type: String,
