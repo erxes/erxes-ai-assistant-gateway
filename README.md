@@ -11,7 +11,8 @@ Discord guildId + channelId
 -> erxes-ai-assistant-gateway
 -> tenantId
 -> assistantId
--> OpenClaw runtime URL
+-> runtime kind (OpenClaw or Hermes)
+-> isolated runtime adapter URL
 -> assistant answer
 -> Discord reply
 ```
@@ -104,6 +105,12 @@ OPENCLAW_SHARED_SECRET=
 
 Never commit `.env`. Never log Discord tokens, client secrets, gateway admin secrets, or OpenClaw shared secrets.
 
+`OPENCLAW_SHARED_SECRET` is retained for backward compatibility with existing
+OpenClaw adapters and is also the Hermes adapter signing secret. Every runtime
+request includes HMAC-signed tenant, assistant, runtime-kind, HTTP-method, and
+path claims with a short-lived timestamp. A Hermes adapter must verify those
+claims against its own immutable identity before invoking Hermes WebUI.
+
 ## Local Development
 
 ```bash
@@ -180,6 +187,7 @@ curl -X POST http://localhost:3001/api/bindings \
     "tenantId": "test-saas-1",
     "assistantId": "support-assistant-1",
     "assistantName": "Support Assistant",
+    "runtimeKind": "openclaw",
     "discordGuildId": "<discord-guild-id>",
     "discordChannelId": "<discord-channel-id>",
     "openclawUrl": "http://localhost:3001/mock-openclaw"
@@ -241,6 +249,10 @@ Implemented:
 - No secrets in redirect URLs.
 - OpenClaw request timeout handling.
 - Optional `x-erxes-ai-assistant-secret` forwarding.
+- Runtime kind on every binding (`openclaw` by default, `hermes` for Hermes)
+  plus HMAC-signed tenant/assistant identity headers on runtime requests.
+- Hermes binding URLs must use HTTPS outside loopback or Kubernetes service
+  DNS, and Hermes bindings require `OPENCLAW_SHARED_SECRET`.
 - Tenant/guild installation validation before binding writes.
 - One active binding per Discord guild/channel.
 - Production startup rejects placeholder gateway admin secrets and refuses to enable the mock OpenClaw route.

@@ -163,6 +163,7 @@ discordInteractionsRouter.post(
           openclawUrl: binding.openclawUrl,
           tenantId: binding.tenantId,
           assistantId: binding.assistantId,
+          runtimeKind: binding.runtimeKind || "openclaw",
           question,
           user,
           discord: {
@@ -237,6 +238,7 @@ discordInteractionsRouter.post(
         openclawUrl: binding.openclawUrl,
         tenantId: binding.tenantId,
         assistantId: binding.assistantId,
+        runtimeKind: binding.runtimeKind || "openclaw",
         question,
         user,
         discord: {
@@ -273,7 +275,12 @@ discordInteractionsRouter.post(
         const { payloads, failed, blocked } = await buildRuntimeFilePayloads(
           binding.openclawUrl,
           result.files,
-          downloadRuntimeGeneratedFile,
+          (url, fileId) =>
+            downloadRuntimeGeneratedFile(url, fileId, {
+              tenantId: binding.tenantId,
+              assistantId: binding.assistantId,
+              runtimeKind: binding.runtimeKind || "openclaw",
+            }),
         );
 
         if (payloads.length > 0) {

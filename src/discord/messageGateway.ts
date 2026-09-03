@@ -462,6 +462,7 @@ export const handleDiscordMessage = async (
     openclawUrl: binding.openclawUrl,
     tenantId: binding.tenantId,
     assistantId: binding.assistantId,
+    runtimeKind: binding.runtimeKind || "openclaw",
     question,
     user: {
       id: message.author.id,
@@ -651,7 +652,9 @@ export const handleDiscordMessage = async (
 
     if (askResult.files.length > 0) {
       const fetchRuntimeFile =
-        deps.fetchRuntimeFile ?? downloadRuntimeGeneratedFile;
+        deps.fetchRuntimeFile ??
+        ((url: string, fileId: string) =>
+          downloadRuntimeGeneratedFile(url, fileId, askInput));
       const { payloads, failed, blocked } = await buildRuntimeFilePayloads(
         binding.openclawUrl,
         askResult.files,

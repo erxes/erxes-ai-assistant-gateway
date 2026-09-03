@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 
+import { env } from "../config/env.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
 import {
@@ -14,6 +15,10 @@ import {
   rehomeBindingsForRuntime,
   runtimeUrlVariants,
 } from "../discord/bindingLifecycle.js";
+import {
+  assistantRuntimeKinds,
+  type AssistantRuntimeKind,
+} from "../runtime/identity.js";
 import { requireAdminSecret } from "./adminAuth.js";
 
 export const adminBindingsRouter = Router();
@@ -61,12 +66,69 @@ const parseResponseMode = (
   return value as DiscordAssistantResponseMode;
 };
 
+const parseRuntimeKind = (
+  value: unknown,
+): AssistantRuntimeKind | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (
+    typeof value !== "string" ||
+    !assistantRuntimeKinds.includes(value as AssistantRuntimeKind)
+  ) {
+    throw badRequest("runtimeKind must be openclaw or hermes");
+  }
+
+  return value as AssistantRuntimeKind;
+};
+
+const validateRuntimeUrl = (value: string, runtimeKind: AssistantRuntimeKind) => {
+  let url: URL;
+
+  try {
+    url = new URL(value);
+  } catch {
+    throw badRequest("openclawUrl must be a valid absolute URL");
+  }
+
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw badRequest(
+      "openclawUrl must be an HTTP(S) URL without credentials, query, or fragment",
+    );
+  }
+
+  const internalHttp =
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname.endsWith(".svc") ||
+    url.hostname.endsWith(".svc.cluster.local");
+
+  if (
+    runtimeKind === "hermes" &&
+    url.protocol !== "https:" &&
+    !(url.protocol === "http:" && internalHttp)
+  ) {
+    throw badRequest("Hermes runtime URLs must use HTTPS outside the cluster");
+  }
+
+  return value.replace(/\/+$/, "");
+};
+
 const parseCreateBindingBody = (body: unknown) => {
   if (!body || typeof body !== "object") {
     throw badRequest("Request body must be an object");
   }
 
   const data = body as Record<string, unknown>;
+
+  const runtimeKind = parseRuntimeKind(data.runtimeKind) ?? "openclaw";
 
   return {
     installationId: optionalString(data, "installationId"),
@@ -75,7 +137,11 @@ const parseCreateBindingBody = (body: unknown) => {
     assistantName: optionalString(data, "assistantName"),
     discordGuildId: requiredString(data, "discordGuildId"),
     discordChannelId: requiredString(data, "discordChannelId"),
-    openclawUrl: requiredString(data, "openclawUrl"),
+    openclawUrl: validateRuntimeUrl(
+      requiredString(data, "openclawUrl"),
+      runtimeKind,
+    ),
+    runtimeKind,
     enabled: typeof data.enabled === "boolean" ? data.enabled : true,
     responseMode: parseResponseMode(data.responseMode) ?? "slash_only",
   };
@@ -156,6 +222,12 @@ adminBindingsRouter.post(
   asyncHandler(async (req, res) => {
     const input = parseCreateBindingBody(req.body);
 
+    if (input.runtimeKind === "hermes" && !env.OPENCLAW_SHARED_SECRET) {
+      throw badRequest(
+        "OPENCLAW_SHARED_SECRET is required for Hermes runtime bindings",
+      );
+    }
+
     await loadConnectedInstallation(input);
     await assertChannelAvailable(input);
 
@@ -172,6 +244,7 @@ adminBindingsRouter.post(
           discordGuildId: input.discordGuildId,
           discordChannelId: input.discordChannelId,
           openclawUrl: input.openclawUrl,
+          runtimeKind: input.runtimeKind,
           enabled: input.enabled,
           responseMode: input.responseMode,
         },
@@ -191,6 +264,7 @@ adminBindingsRouter.get(
     for (const field of [
       "tenantId",
       "assistantId",
+      "runtimeKind",
       "discordGuildId",
       "discordChannelId",
     ]) {
@@ -314,9 +388,14 @@ adminBindingsRouter.patch(
     }
 
     const responseMode = parseResponseMode(data.responseMode);
+    const runtimeKind = parseRuntimeKind(data.runtimeKind);
 
     if (responseMode) {
       update.responseMode = responseMode;
+    }
+
+    if (runtimeKind) {
+      update.runtimeKind = runtimeKind;
     }
 
     const currentBinding = await DiscordAssistantBinding.findById(req.params.id);
@@ -332,6 +411,22 @@ adminBindingsRouter.patch(
     const nextChannelId = String(
       update.discordChannelId ?? currentBinding.discordChannelId,
     );
+    const nextRuntimeKind = (update.runtimeKind ??
+      currentBinding.runtimeKind ??
+      "openclaw") as AssistantRuntimeKind;
+
+    if (nextRuntimeKind === "hermes" && !env.OPENCLAW_SHARED_SECRET) {
+      throw badRequest(
+        "OPENCLAW_SHARED_SECRET is required for Hermes runtime bindings",
+      );
+    }
+
+    if (update.openclawUrl !== undefined || runtimeKind) {
+      update.openclawUrl = validateRuntimeUrl(
+        String(update.openclawUrl ?? currentBinding.openclawUrl),
+        nextRuntimeKind,
+      );
+    }
 
     await loadConnectedInstallation({
       tenantId: nextTenantId,

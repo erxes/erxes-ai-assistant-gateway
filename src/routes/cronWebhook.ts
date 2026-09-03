@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 import { Router } from "express";
 
-import { getDiscordChannel, sendChannelMessage } from "../discord/api.js";
+import {
+  getDiscordChannel,
+  getDiscordGuildChannels,
+  sendChannelMessage,
+} from "../discord/api.js";
 import { env } from "../config/env.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { logger } from "../lib/logger.js";
@@ -94,7 +98,9 @@ cronWebhookRouter.post(
   asyncHandler(async (req, res) => {
     const assistantId = String(req.query.assistant ?? req.query.assistantId ?? "");
     const token = String(req.query.token ?? "");
-    const channelId = String(req.query.channel ?? req.query.channelId ?? "");
+    const channelRef = String(req.query.channel ?? req.query.channelId ?? "")
+      .trim()
+      .replace(/^#/, "");
 
     if (!env.CRON_WEBHOOK_SECRET) {
       res.status(503).json({ error: "cron webhook not configured" });
@@ -104,8 +110,8 @@ cronWebhookRouter.post(
       res.status(401).json({ error: "unauthorized" });
       return;
     }
-    if (!/^\d{5,25}$/.test(channelId)) {
-      res.status(400).json({ error: "invalid channel id" });
+    if (!channelRef) {
+      res.status(400).json({ error: "missing channel" });
       return;
     }
 
@@ -116,30 +122,58 @@ cronWebhookRouter.post(
     })
       .select("discordGuildId")
       .lean();
-    const guilds = new Set(
-      bindings.map((b) => b.discordGuildId).filter(Boolean) as string[],
-    );
-    if (guilds.size === 0) {
+    const guilds = [
+      ...new Set(bindings.map((b) => b.discordGuildId).filter(Boolean) as string[]),
+    ];
+    if (guilds.length === 0) {
       res.status(403).json({ error: "assistant has no active discord binding" });
       return;
     }
 
-    // The target channel must live in one of this assistant's guilds.
-    let channelGuild = "";
-    try {
-      channelGuild = String((await getDiscordChannel(channelId)).guild_id ?? "");
-    } catch {
-      res.status(400).json({ error: "channel not found" });
-      return;
-    }
-    if (!channelGuild || !guilds.has(channelGuild)) {
-      logger.info("cron-webhook: channel not in assistant's guild (denied)", {
-        assistantId,
-        channelId,
-        channelGuild,
-      });
-      res.status(403).json({ error: "channel is not in this assistant's server" });
-      return;
+    // Resolve the channel — accept either a numeric ID or a channel NAME, always
+    // scoped to THIS assistant's own guild(s) (tenant isolation). Name resolution
+    // lets a cron post into the channel it created without knowing the raw ID.
+    let channelId = "";
+    if (/^\d{5,25}$/.test(channelRef)) {
+      try {
+        const g = String((await getDiscordChannel(channelRef)).guild_id ?? "");
+        if (g && guilds.includes(g)) channelId = channelRef;
+      } catch {
+        /* not found */
+      }
+      if (!channelId) {
+        logger.info("cron-webhook: channel id not in assistant's guild (denied)", {
+          assistantId,
+          channelRef,
+        });
+        res.status(403).json({ error: "channel is not in this assistant's server" });
+        return;
+      }
+    } else {
+      const norm = channelRef.toLowerCase().replace(/\s+/g, "-");
+      for (const g of guilds) {
+        try {
+          const found = (await getDiscordGuildChannels(g)).find(
+            (c) => (c.name || "").toLowerCase() === norm,
+          );
+          if (found) {
+            channelId = found.id;
+            break;
+          }
+        } catch {
+          /* skip guild */
+        }
+      }
+      if (!channelId) {
+        logger.info("cron-webhook: channel name not found in assistant's guild", {
+          assistantId,
+          channelRef,
+        });
+        res
+          .status(404)
+          .json({ error: "channel name not found in this assistant's server" });
+        return;
+      }
     }
 
     const text = extractText(req.body).trim();
