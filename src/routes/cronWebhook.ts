@@ -10,22 +10,37 @@ import { env } from "../config/env.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { logger } from "../lib/logger.js";
 import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
+import type { AssistantRuntimeKind } from "../runtime/identity.js";
 
-// Bridge for OpenClaw cron jobs that should announce to a Discord channel.
+// Bridge for runtime cron jobs that should announce to a Discord channel.
 // The managed runtime has no direct Discord, so a cron created with
 //   --webhook "<gateway>/webhooks/discord-cron?assistant=<id>&token=<T>&channel=<channelId>"
 // POSTs its finished payload here; the gateway posts the result to the channel
-// using the shared bot (which has Administrator in the guild).
+// using the shared bot and its explicitly configured guild permissions.
 //
-// PER-ASSISTANT SCOPING (tenant isolation):
-//  - token = HMAC-SHA256(CRON_WEBHOOK_SECRET, assistantId) — each assistant has
-//    its own token; a leaked token cannot forge another assistant's token.
-//  - the target channel's guild MUST be a guild this assistantId is bound to,
-//    so assistant A can never post into assistant B's server.
-const expectedToken = (assistantId: string): string =>
+// SCOPING:
+//  - Hermes and new OpenClaw URLs sign tenant + assistant + runtime kind.
+//  - Existing OpenClaw URLs signed with assistantId remain valid, but can only
+//    resolve OpenClaw (or pre-runtimeKind) bindings.
+//  - The target channel's guild must belong to the resolved binding scope.
+export type DiscordCronScope = {
+  assistantId: string;
+  tenantId?: string;
+  runtimeKind?: AssistantRuntimeKind;
+};
+
+const cronTokenPayload = (scope: DiscordCronScope) =>
+  scope.tenantId && scope.runtimeKind
+    ? ["v2", scope.tenantId, scope.assistantId, scope.runtimeKind].join("\n")
+    : scope.assistantId;
+
+export const buildDiscordCronToken = (
+  scope: DiscordCronScope,
+  secret = env.CRON_WEBHOOK_SECRET,
+): string =>
   crypto
-    .createHmac("sha256", env.CRON_WEBHOOK_SECRET)
-    .update(assistantId)
+    .createHmac("sha256", secret)
+    .update(cronTokenPayload(scope))
     .digest("hex")
     .slice(0, 32);
 
@@ -33,6 +48,51 @@ const safeEqual = (a: string, b: string): boolean => {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+};
+
+export const validateDiscordCronToken = (
+  token: string,
+  scope: DiscordCronScope,
+  secret = env.CRON_WEBHOOK_SECRET,
+) =>
+  Boolean(
+    token && secret && safeEqual(token, buildDiscordCronToken(scope, secret)),
+  );
+
+export const buildCronBindingQuery = (scope: DiscordCronScope) => {
+  const identity = {
+    assistantId: scope.assistantId,
+    enabled: true,
+  };
+
+  if (scope.tenantId && scope.runtimeKind === "hermes") {
+    return {
+      ...identity,
+      tenantId: scope.tenantId,
+      runtimeKind: "hermes",
+    };
+  }
+
+  if (scope.tenantId && scope.runtimeKind === "openclaw") {
+    return {
+      ...identity,
+      tenantId: scope.tenantId,
+      $or: [
+        { runtimeKind: "openclaw" },
+        { runtimeKind: { $exists: false } },
+      ],
+    };
+  }
+
+  // Backward compatibility for deployed OpenClaw cron URLs. Never allow a
+  // legacy assistant-only token to select an explicitly-Hermes binding.
+  return {
+    ...identity,
+    $or: [
+      { runtimeKind: "openclaw" },
+      { runtimeKind: { $exists: false } },
+    ],
+  };
 };
 
 // Metadata-ish keys whose string values are never the human-facing result.
@@ -98,6 +158,10 @@ cronWebhookRouter.post(
   asyncHandler(async (req, res) => {
     const assistantId = String(req.query.assistant ?? req.query.assistantId ?? "");
     const token = String(req.query.token ?? "");
+    const tenantId = String(req.query.tenant ?? req.query.tenantId ?? "").trim();
+    const runtimeKindValue = String(
+      req.query.runtime ?? req.query.runtimeKind ?? "",
+    ).trim();
     const channelRef = String(req.query.channel ?? req.query.channelId ?? "")
       .trim()
       .replace(/^#/, "");
@@ -106,7 +170,28 @@ cronWebhookRouter.post(
       res.status(503).json({ error: "cron webhook not configured" });
       return;
     }
-    if (!assistantId || !token || !safeEqual(token, expectedToken(assistantId))) {
+
+    const hasScopedIdentity = Boolean(tenantId || runtimeKindValue);
+    if (
+      hasScopedIdentity &&
+      (!tenantId ||
+        (runtimeKindValue !== "openclaw" && runtimeKindValue !== "hermes"))
+    ) {
+      res.status(400).json({ error: "invalid runtime scope" });
+      return;
+    }
+
+    const scope: DiscordCronScope = {
+      assistantId: assistantId.trim(),
+      ...(hasScopedIdentity
+        ? {
+            tenantId,
+            runtimeKind: runtimeKindValue as AssistantRuntimeKind,
+          }
+        : {}),
+    };
+
+    if (!scope.assistantId || !validateDiscordCronToken(token, scope)) {
       res.status(401).json({ error: "unauthorized" });
       return;
     }
@@ -115,16 +200,20 @@ cronWebhookRouter.post(
       return;
     }
 
-    // The guild(s) this assistant is bound to.
-    const bindings = await DiscordAssistantBinding.find({
-      assistantId,
-      enabled: true,
-    })
-      .select("discordGuildId")
+    // The guild(s) this exact assistant runtime is bound to.
+    const bindings = await DiscordAssistantBinding.find(
+      buildCronBindingQuery(scope),
+    )
+      .select("discordGuildId discordChannelId")
       .lean();
     const guilds = [
       ...new Set(bindings.map((b) => b.discordGuildId).filter(Boolean) as string[]),
     ];
+    const allowedChannelIds = new Set(
+      bindings
+        .map((binding) => binding.discordChannelId)
+        .filter(Boolean) as string[],
+    );
     if (guilds.length === 0) {
       res.status(403).json({ error: "assistant has no active discord binding" });
       return;
@@ -135,6 +224,10 @@ cronWebhookRouter.post(
     // lets a cron post into the channel it created without knowing the raw ID.
     let channelId = "";
     if (/^\d{5,25}$/.test(channelRef)) {
+      if (!allowedChannelIds.has(channelRef)) {
+        res.status(403).json({ error: "channel is not bound to this assistant" });
+        return;
+      }
       try {
         const g = String((await getDiscordChannel(channelRef)).guild_id ?? "");
         if (g && guilds.includes(g)) channelId = channelRef;
@@ -154,7 +247,9 @@ cronWebhookRouter.post(
       for (const g of guilds) {
         try {
           const found = (await getDiscordGuildChannels(g)).find(
-            (c) => (c.name || "").toLowerCase() === norm,
+            (c) =>
+              allowedChannelIds.has(c.id) &&
+              (c.name || "").toLowerCase() === norm,
           );
           if (found) {
             channelId = found.id;
@@ -178,16 +273,13 @@ cronWebhookRouter.post(
 
     const text = extractText(req.body).trim();
     if (!text) {
-      let bodyPreview = "";
-      try {
-        bodyPreview = JSON.stringify(req.body).slice(0, 1500);
-      } catch {
-        bodyPreview = String(req.body).slice(0, 500);
-      }
       logger.info("cron-webhook: no text extracted, nothing to post", {
         channelId,
         bodyType: typeof req.body,
-        bodyPreview,
+        bodyKeys:
+          req.body && typeof req.body === "object" && !Array.isArray(req.body)
+            ? Object.keys(req.body as Record<string, unknown>).slice(0, 20)
+            : [],
       });
       res.status(204).end();
       return;

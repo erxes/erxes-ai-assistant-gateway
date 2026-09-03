@@ -317,6 +317,7 @@ adminBindingsRouter.post(
         tenantId: requiredString(data, "tenantId"),
         assistantId: requiredString(data, "assistantId"),
         assistantName: optionalString(data, "assistantName"),
+        runtimeKind: parseRuntimeKind(data.runtimeKind),
       },
     );
 
@@ -336,6 +337,7 @@ adminBindingsRouter.post(
     const data = req.body as Record<string, unknown>;
     const result = await disableBindingsForRuntime(
       requiredString(data, "openclawUrl"),
+      parseRuntimeKind(data.runtimeKind),
     );
 
     res.json(result);

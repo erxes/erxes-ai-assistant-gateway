@@ -29,24 +29,36 @@ const channelsCache = new ShortCache<
   }>
 >(adminCacheTtlMs);
 
+export const buildInstallationListQuery = (
+  input: Record<string, unknown>,
+): Record<string, string> => {
+  const query: Record<string, string> = {};
+
+  for (const field of ["tenantId", "status"] as const) {
+    const value = getQueryString(input[field]);
+
+    if (value) {
+      query[field] = value;
+    }
+  }
+
+  // assistantId is intentionally not an installation filter. The official bot
+  // is installed once per tenant + guild and its channels can then be bound to
+  // any number of OpenClaw or Hermes assistants in that tenant. Keep accepting
+  // the old query parameter so already-deployed agent_api versions remain
+  // compatible while returning the shared tenant installations.
+  return query;
+};
+
 adminInstallationsRouter.use(requireAdminSecret);
 
 adminInstallationsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const query: Record<string, unknown> = {};
-
-    for (const field of ["tenantId", "assistantId", "status"]) {
-      const value = getQueryString(req.query[field]);
-
-      if (value) {
-        query[field] = value;
-      }
-    }
+    const query = buildInstallationListQuery(req.query);
 
     const cacheKey = JSON.stringify({
       tenantId: query.tenantId ?? "",
-      assistantId: query.assistantId ?? "",
       status: query.status ?? "",
     });
 

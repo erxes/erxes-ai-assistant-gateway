@@ -1,5 +1,6 @@
 import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
 import { DiscordInstallation } from "../models/DiscordInstallation.js";
+import type { AssistantRuntimeKind } from "../runtime/identity.js";
 
 // Bindings freeze the runtime URL at connect time, so lifecycle events that
 // move or destroy a runtime (assistant transfer, namespace delete) must find
@@ -23,6 +24,7 @@ export type RehomeTarget = {
   tenantId: string;
   assistantId: string;
   assistantName?: string;
+  runtimeKind?: AssistantRuntimeKind;
 };
 
 type GuildRef = { discordGuildId: string };
@@ -52,6 +54,28 @@ export type RehomeResult = {
   installationsCloned: number;
 };
 
+export const bindingsForRuntimeQuery = (
+  openclawUrl: string,
+  runtimeKind?: AssistantRuntimeKind,
+) => {
+  const runtimeUrl = { openclawUrl: { $in: runtimeUrlVariants(openclawUrl) } };
+
+  if (runtimeKind === "hermes") {
+    return { ...runtimeUrl, runtimeKind };
+  }
+
+  // Omitted runtimeKind is the legacy OpenClaw call shape. Treating it as a
+  // wildcard could move or disable a Hermes binding that happens to share a
+  // URL, so both explicit and legacy OpenClaw calls exclude Hermes rows.
+  return {
+    ...runtimeUrl,
+    $or: [
+      { runtimeKind: "openclaw" },
+      { runtimeKind: { $exists: false } },
+    ],
+  };
+};
+
 export const rehomeBindingsForRuntime = async (
   openclawUrl: string,
   target: RehomeTarget,
@@ -62,9 +86,8 @@ export const rehomeBindingsForRuntime = async (
     return { matched: 0, rehomed: 0, installationsCloned: 0 };
   }
 
-  const bindings = await DiscordAssistantBinding.find({
-    openclawUrl: { $in: urls },
-  }).lean();
+  const runtimeQuery = bindingsForRuntimeQuery(openclawUrl, target.runtimeKind);
+  const bindings = await DiscordAssistantBinding.find(runtimeQuery).lean();
 
   if (!bindings.length) {
     return { matched: 0, rehomed: 0, installationsCloned: 0 };
@@ -98,11 +121,8 @@ export const rehomeBindingsForRuntime = async (
     try {
       await DiscordInstallation.create({
         tenantId: target.tenantId,
-        assistantId: target.assistantId,
         discordGuildId: guildId,
         discordGuildName: source.discordGuildName,
-        installedByDiscordUserId: source.installedByDiscordUserId,
-        installedByErxesUserId: source.installedByErxesUserId,
         status: "connected",
         scopes: source.scopes,
         permissions: source.permissions,
@@ -118,11 +138,12 @@ export const rehomeBindingsForRuntime = async (
   }
 
   const updated = await DiscordAssistantBinding.updateMany(
-    { openclawUrl: { $in: urls } },
+    runtimeQuery,
     {
       $set: {
         tenantId: target.tenantId,
         assistantId: target.assistantId,
+        ...(target.runtimeKind ? { runtimeKind: target.runtimeKind } : {}),
         ...(target.assistantName
           ? { assistantName: target.assistantName }
           : {}),
@@ -139,6 +160,7 @@ export const rehomeBindingsForRuntime = async (
 
 export const disableBindingsForRuntime = async (
   openclawUrl: string,
+  runtimeKind?: AssistantRuntimeKind,
 ): Promise<{ disabled: number }> => {
   const urls = runtimeUrlVariants(openclawUrl);
 
@@ -147,7 +169,10 @@ export const disableBindingsForRuntime = async (
   }
 
   const updated = await DiscordAssistantBinding.updateMany(
-    { openclawUrl: { $in: urls }, enabled: true },
+    {
+      ...bindingsForRuntimeQuery(openclawUrl, runtimeKind),
+      enabled: true,
+    },
     { $set: { enabled: false } },
   );
 

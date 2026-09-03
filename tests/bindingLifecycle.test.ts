@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  bindingsForRuntimeQuery,
   guildsNeedingInstallation,
   normalizeRuntimeUrl,
   runtimeUrlVariants,
@@ -26,6 +27,54 @@ test("runtimeUrlVariants matches both stored spellings of the same runtime", () 
   ]);
   assert.deepEqual(runtimeUrlVariants(""), []);
   assert.deepEqual(runtimeUrlVariants("  "), []);
+});
+
+test("Hermes lifecycle actions cannot match OpenClaw bindings at the same URL", () => {
+  assert.deepEqual(
+    bindingsForRuntimeQuery("https://assistant.example.com/", "hermes"),
+    {
+      openclawUrl: {
+        $in: [
+          "https://assistant.example.com",
+          "https://assistant.example.com/",
+        ],
+      },
+      runtimeKind: "hermes",
+    },
+  );
+});
+
+test("legacy OpenClaw lifecycle callers cannot match Hermes bindings", () => {
+  assert.deepEqual(bindingsForRuntimeQuery("https://assistant.example.com"), {
+    openclawUrl: {
+      $in: [
+        "https://assistant.example.com",
+        "https://assistant.example.com/",
+      ],
+    },
+    $or: [
+      { runtimeKind: "openclaw" },
+      { runtimeKind: { $exists: false } },
+    ],
+  });
+});
+
+test("explicit OpenClaw lifecycle matching includes pre-runtimeKind rows", () => {
+  assert.deepEqual(
+    bindingsForRuntimeQuery("https://assistant.example.com", "openclaw"),
+    {
+      openclawUrl: {
+        $in: [
+          "https://assistant.example.com",
+          "https://assistant.example.com/",
+        ],
+      },
+      $or: [
+        { runtimeKind: "openclaw" },
+        { runtimeKind: { $exists: false } },
+      ],
+    },
+  );
 });
 
 test("guildsNeedingInstallation lists guilds the target tenant cannot yet manage", () => {

@@ -1,5 +1,7 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router, type Response } from "express";
 
+import { env } from "../config/env.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { badRequest } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
@@ -12,7 +14,7 @@ import {
   validateReturnUrl,
 } from "../discord/oauth.js";
 import { discordOAuthScopes } from "../discord/oauth.js";
-import { hasAdministratorPermission } from "../discord/permissions.js";
+import { hasRequiredBotPermissions } from "../discord/permissions.js";
 import {
   exchangeDiscordOAuthCode,
   getDiscordGuild,
@@ -63,6 +65,49 @@ const getQueryString = (value: unknown) =>
     ? value.trim()
     : undefined;
 
+const oauthStartPayload = (claims: {
+  tenantId: string;
+  assistantId?: string;
+  erxesUserId?: string;
+  returnUrl?: string;
+  expiresAt: string;
+}) =>
+  [
+    claims.tenantId,
+    claims.assistantId || "",
+    claims.erxesUserId || "",
+    claims.returnUrl || "",
+    claims.expiresAt,
+  ].join("\n");
+
+export const validateOAuthStartSignature = (
+  claims: Parameters<typeof oauthStartPayload>[0],
+  signature: string | undefined,
+  secret = env.ERXES_GATEWAY_ADMIN_SECRET,
+) => {
+  const expiresAt = Number(claims.expiresAt);
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    !signature ||
+    !secret ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= now ||
+    expiresAt > now + 15 * 60
+  ) {
+    return false;
+  }
+
+  const expected = createHmac("sha256", secret)
+    .update(oauthStartPayload(claims))
+    .digest("hex");
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  return (
+    actualBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(actualBuffer, expectedBuffer)
+  );
+};
+
 const sendOAuthError = (res: Response, returnUrl: string | undefined, message: string) => {
   if (returnUrl) {
     res.redirect(
@@ -91,9 +136,13 @@ export const createDiscordOAuthRouter = ({
     asyncHandler(async (req, res) => {
       const tenantId = getQueryString(req.query.tenantId);
       const returnUrl = getQueryString(req.query.returnUrl);
+      const assistantId = getQueryString(req.query.assistantId);
+      const erxesUserId = getQueryString(req.query.erxesUserId);
+      const claimsExpiresAt = getQueryString(req.query.expiresAt);
+      const signature = getQueryString(req.query.signature);
 
-      if (!tenantId) {
-        throw badRequest("tenantId is required");
+      if (!tenantId || !claimsExpiresAt) {
+        throw badRequest("signed OAuth start claims are required");
       }
 
       const validatedReturnUrl = validateReturnUrl(returnUrl);
@@ -102,14 +151,29 @@ export const createDiscordOAuthRouter = ({
         throw badRequest("returnUrl is not allowed");
       }
 
+      if (
+        !validateOAuthStartSignature(
+          {
+            tenantId,
+            assistantId,
+            erxesUserId,
+            returnUrl: validatedReturnUrl,
+            expiresAt: claimsExpiresAt,
+          },
+          signature,
+        )
+      ) {
+        throw badRequest("invalid or expired OAuth start signature");
+      }
+
       const state = createSecureState();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
       await OAuthStateModel.create({
         state,
         tenantId,
-        assistantId: getQueryString(req.query.assistantId),
-        erxesUserId: getQueryString(req.query.erxesUserId),
+        assistantId,
+        erxesUserId,
         returnUrl: validatedReturnUrl,
         expiresAt,
       });
@@ -152,14 +216,14 @@ export const createDiscordOAuthRouter = ({
         return;
       }
 
-      if (!hasAdministratorPermission(permissions)) {
-        logger.warn("Discord OAuth callback missing Administrator permission", {
+      if (!hasRequiredBotPermissions(permissions)) {
+        logger.warn("Discord OAuth callback missing required bot permissions", {
           permissions,
         });
         sendOAuthError(
           res,
           oauthState.returnUrl,
-          "missing-administrator-permission",
+          "missing-required-bot-permissions",
         );
         return;
       }
@@ -198,13 +262,21 @@ export const createDiscordOAuthRouter = ({
         return;
       }
 
-      const guildId =
-        getQueryString(req.query.guild_id) ??
-        oauthMe.guild?.id;
+      const callbackGuildId = getQueryString(req.query.guild_id);
+      const guildId = token.guild?.id;
 
       if (!guildId) {
-        logger.warn("Discord OAuth installation details missing guild");
+        logger.warn("Discord OAuth token response missing installed guild");
         sendOAuthError(res, oauthState.returnUrl, "missing-discord-guild");
+        return;
+      }
+
+      if (callbackGuildId && callbackGuildId !== guildId) {
+        logger.warn("Discord OAuth callback guild did not match token response", {
+          callbackGuildId,
+          tokenGuildId: guildId,
+        });
+        sendOAuthError(res, oauthState.returnUrl, "discord-guild-mismatch");
         return;
       }
 
@@ -227,15 +299,19 @@ export const createDiscordOAuthRouter = ({
           discordGuildId: guildId,
         },
         {
-          tenantId: oauthState.tenantId,
-          assistantId: oauthState.assistantId,
-          discordGuildId: guildId,
-          discordGuildName: oauthMe.guild?.name ?? guild.name,
-          installedByDiscordUserId: oauthMe.user?.id,
-          installedByErxesUserId: oauthState.erxesUserId,
-          status: "connected",
-          scopes: [...discordOAuthScopes],
-          permissions,
+          $set: {
+            tenantId: oauthState.tenantId,
+            discordGuildId: guildId,
+            discordGuildName: token.guild?.name ?? guild.name,
+            installedByDiscordUserId: oauthMe.user?.id,
+            installedByErxesUserId: oauthState.erxesUserId,
+            status: "connected",
+            scopes: [...discordOAuthScopes],
+            permissions,
+          },
+          // assistantId was stored by older versions even though the official
+          // bot installation is shared by every assistant in the tenant.
+          $unset: { assistantId: 1 },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
       );

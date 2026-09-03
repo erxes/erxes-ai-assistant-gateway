@@ -401,6 +401,7 @@ export const runDiscordAssistantJob = async (
           tenantId: record.tenantId,
           assistantId: record.assistantId,
           openclawUrl: record.openclawUrl,
+          runtimeKind: record.runtimeKind || "openclaw",
         };
         const created = await applyChannelCreateMarkers(
           guardedAnswer,
@@ -415,6 +416,7 @@ export const runDiscordAssistantJob = async (
           created.text,
           record.assistantId,
           log,
+          channelBindingCtx,
         );
         const finalAnswer =
           [posted.text, created.note, posted.note]

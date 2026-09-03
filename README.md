@@ -19,6 +19,11 @@ Discord guildId + channelId
 
 Customers do not create Discord applications, provide bot tokens, enable privileged intents, or calculate permissions. The gateway-generated installation URL requests the configured bot permission integer, and Erxes Admin owns tenant authorization and channel binding.
 
+An installation belongs to a tenant and Discord guild, not to an individual
+assistant. Install the official bot once, then reuse that installation for
+OpenClaw and Hermes channel bindings in the same tenant. `assistantId` remains
+accepted on installation list requests for compatibility but is not a filter.
+
 ## Discord Application Setup
 
 Create the Discord application manually in the Discord Developer Portal.
@@ -40,13 +45,17 @@ Public Key
 Bot Token
 ```
 
-Do not enable these privileged intents for the MVP:
+Enable only this privileged intent for the `all_messages` response mode:
 
 ```text
-Presence Intent
-Server Members Intent
 Message Content Intent
 ```
+
+Leave Presence Intent and Server Members Intent disabled.
+
+Enable **Requires OAuth2 Code Grant** for the bot. The callback accepts the
+installed guild from Discord's exchanged token response; the callback query
+guild is only a consistency hint.
 
 Use OAuth installation scopes:
 
@@ -55,13 +64,18 @@ bot
 applications.commands
 ```
 
-The gateway-generated installation flow requests Discord Administrator permission:
+The gateway-generated installation flow requests only the permissions used by
+the shared bot:
 
 ```text
-Administrator permission integer: 8
+Manage Channels + View Channels + Send Messages + Embed Links + Attach Files +
+Read Message History + Send Messages in Threads: 274878024720
 ```
 
-Administrator grants the official erxes Ai Assistant bot full permissions in the selected Discord server. SaaS users do not use the Discord Developer Portal OAuth2 URL Generator directly; they use `/discord/oauth/start`, which generates the install URL with `permissions=8`.
+Administrator is not required. SaaS users do not use the Discord Developer
+Portal OAuth2 URL Generator directly; they use `/discord/oauth/start`, which
+generates the install URL with the configured least-privilege permission set.
+Older installations granted Administrator remain compatible.
 
 Configure hosted URLs:
 
@@ -92,7 +106,7 @@ DISCORD_PUBLIC_KEY=
 DISCORD_BOT_TOKEN=
 DISCORD_REDIRECT_URI=http://localhost:3001/discord/oauth/callback
 DISCORD_TEST_GUILD_ID=
-DISCORD_BOT_PERMISSIONS=8
+DISCORD_BOT_PERMISSIONS=274878024720
 ENABLE_MOCK_OPENCLAW=false
 
 ERXES_GATEWAY_ADMIN_SECRET=change-me
@@ -101,6 +115,7 @@ ERXES_ALLOWED_RETURN_URLS=http://localhost:3000
 OPENCLAW_REQUEST_TIMEOUT_MS=120000
 ERXES_ASSISTANT_REPLY_MAX_CHARS=1800
 OPENCLAW_SHARED_SECRET=
+CRON_WEBHOOK_SECRET=
 ```
 
 Never commit `.env`. Never log Discord tokens, client secrets, gateway admin secrets, or OpenClaw shared secrets.
@@ -110,6 +125,17 @@ OpenClaw adapters and is also the Hermes adapter signing secret. Every runtime
 request includes HMAC-signed tenant, assistant, runtime-kind, HTTP-method, and
 path claims with a short-lived timestamp. A Hermes adapter must verify those
 claims against its own immutable identity before invoking Hermes WebUI.
+
+Hermes cron delivery URLs use the scoped webhook contract:
+
+```text
+POST /webhooks/discord-cron?tenant=<tenantId>&assistant=<assistantId>&runtime=hermes&channel=<channelId-or-name>&token=<scoped-token>
+```
+
+The scoped token is HMAC-SHA256 over `v2`, tenant ID, assistant ID, and runtime
+kind, separated by newlines, truncated to 32 hexadecimal characters. Existing
+assistant-only OpenClaw webhook tokens remain accepted only for OpenClaw and
+legacy pre-runtimeKind bindings.
 
 ## Local Development
 
@@ -137,9 +163,10 @@ curl http://localhost:3001/health
 
 OAuth start:
 
-```bash
-curl -I "http://localhost:3001/discord/oauth/start?tenantId=test-saas-1&assistantId=support-assistant-1&erxesUserId=local-admin-1&returnUrl=http%3A%2F%2Flocalhost%3A3000%2Fsettings%2Fautomations%2Fagents%2Fsupport-assistant-1"
-```
+Use the authenticated `agentDiscordConnectUrl` GraphQL query in `agent_api`.
+It returns a short-lived URL whose tenant, assistant, user, return URL, and
+expiry are signed with `ERXES_GATEWAY_ADMIN_SECRET`; a browser cannot choose
+another tenant by editing the query string.
 
 Register slash command:
 
@@ -230,7 +257,14 @@ GET /api/bindings/:id
 POST /api/bindings
 PATCH /api/bindings/:id
 DELETE /api/bindings/:id
+POST /api/bindings/rehome
+POST /api/bindings/disable-by-url
 ```
+
+Hermes lifecycle callers include `runtimeKind: "hermes"` in the rehome and
+disable-by-url request bodies. The field is optional so existing OpenClaw
+callers remain compatible, while Hermes lifecycle changes cannot match an
+OpenClaw binding that happens to store the same runtime URL.
 
 ## Security
 
@@ -239,11 +273,12 @@ Implemented:
 - Discord Ed25519 request signature verification.
 - Raw request body preservation for interactions.
 - Secure expiring single-use OAuth state.
-- OAuth callback only saves connected installations after OAuth code exchange succeeds, Discord returns the installed guild, the bot can fetch the guild, and returned permissions include Administrator.
+- OAuth callback only saves connected installations after OAuth code exchange succeeds, Discord returns the installed guild, the bot can fetch the guild, and returned permissions include the required least-privilege set (or Administrator for an older install).
 - Erxes return URL allowlist.
 - Protected internal APIs with `x-erxes-gateway-admin-secret`.
-- No privileged Discord intents for MVP.
-- The gateway-generated install URL requests Administrator permission with `permissions=8`.
+- Only the Message Content privileged intent is used; Presence and Server
+  Members intents remain disabled.
+- The gateway-generated install URL requests only the permissions used for channel management, messages, files, embeds, history, and thread replies.
 - OAuth scopes remain only `bot` and `applications.commands`.
 - No customer bot tokens.
 - No secrets in redirect URLs.
@@ -251,6 +286,8 @@ Implemented:
 - Optional `x-erxes-ai-assistant-secret` forwarding.
 - Runtime kind on every binding (`openclaw` by default, `hermes` for Hermes)
   plus HMAC-signed tenant/assistant identity headers on runtime requests.
+- Channels created by either runtime inherit the originating binding's runtime
+  kind, and cross-channel actions remain scoped to that tenant and runtime.
 - Hermes binding URLs must use HTTPS outside loopback or Kubernetes service
   DNS, and Hermes bindings require `OPENCLAW_SHARED_SECRET`.
 - Tenant/guild installation validation before binding writes.

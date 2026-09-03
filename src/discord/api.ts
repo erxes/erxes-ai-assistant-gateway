@@ -138,8 +138,8 @@ export const getDiscordGuild = (guildId: string) =>
 export const getDiscordGuildChannels = (guildId: string) =>
   discordFetch<DiscordChannel[]>(`/guilds/${guildId}/channels`);
 
-// Create a channel in a guild. The bot is invited with Administrator, so it has
-// Manage Channels. type 0 = GUILD_TEXT.
+// Create a channel in a guild. The managed install requests Manage Channels;
+// type 0 = GUILD_TEXT.
 export const createGuildChannel = (
   guildId: string,
   name: string,
@@ -170,6 +170,7 @@ export type DiscordOAuthTokenResponse = {
   access_token?: string;
   token_type?: string;
   scope?: string;
+  guild?: DiscordGuild;
 };
 
 export const exchangeDiscordOAuthCode = async (code: string) => {
