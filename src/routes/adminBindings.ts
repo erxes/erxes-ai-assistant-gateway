@@ -83,7 +83,10 @@ const parseRuntimeKind = (
   return value as AssistantRuntimeKind;
 };
 
-const validateRuntimeUrl = (value: string, runtimeKind: AssistantRuntimeKind) => {
+export const validateRuntimeUrl = (
+  value: string,
+  runtimeKind: AssistantRuntimeKind,
+) => {
   let url: URL;
 
   try {
@@ -118,7 +121,12 @@ const validateRuntimeUrl = (value: string, runtimeKind: AssistantRuntimeKind) =>
     throw badRequest("Hermes runtime URLs must use HTTPS outside the cluster");
   }
 
-  return value.replace(/\/+$/, "");
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+
+  return value.slice(0, end);
 };
 
 const parseCreateBindingBody = (body: unknown) => {
