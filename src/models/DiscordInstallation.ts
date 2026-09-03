@@ -3,6 +3,8 @@ import { model, Schema, type InferSchemaType } from "mongoose";
 const discordInstallationSchema = new Schema(
   {
     tenantId: { type: String, required: true, trim: true },
+    // Legacy metadata only. Installations belong to tenant + guild; assistant
+    // ownership lives on DiscordAssistantBinding.
     assistantId: { type: String, trim: true },
     discordGuildId: { type: String, required: true, trim: true },
     discordGuildName: { type: String, trim: true },

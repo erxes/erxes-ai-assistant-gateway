@@ -5,11 +5,13 @@ import {
   sendChannelMessage,
 } from "./api.js";
 import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
+import type { AssistantRuntimeKind } from "../runtime/identity.js";
 
 // The model can ask the gateway to create a Discord channel by emitting a marker
 // in its answer, e.g.  [discord-create-channel: project updates]
 // The gateway creates the channel in the originating guild (the bot is invited
-// with Administrator), strips the marker from the answer, and appends a short
+// with its managed channel permissions), strips the marker from the answer,
+// and appends a short
 // confirmation. Mirrors the existing [discord-file: …] delivery markers.
 const CREATE_CHANNEL_MARKER_RE = /\[discord-create-channel:\s*([^\]]+?)\s*\]/gi;
 const MAX_CHANNELS_PER_MESSAGE = 5;
@@ -32,6 +34,85 @@ export type ChannelBindingContext = {
   assistantId: string;
   assistantName?: string;
   openclawUrl: string;
+  runtimeKind?: AssistantRuntimeKind;
+};
+
+export const buildChannelBindingUpdate = (
+  context: ChannelBindingContext,
+  guildId: string,
+  channelId: string,
+) => ({
+  tenantId: context.tenantId,
+  assistantId: context.assistantId,
+  assistantName: context.assistantName,
+  openclawUrl: context.openclawUrl,
+  runtimeKind: context.runtimeKind || "openclaw",
+  discordGuildId: guildId,
+  discordChannelId: channelId,
+  enabled: true,
+  responseMode: "all_messages" as const,
+});
+
+// A model-created channel may reuse an existing Discord channel, but it must
+// never take an active binding away from another tenant or assistant. The
+// filter is used with an atomic upsert so concurrent marker processing cannot
+// overwrite a binding that changed ownership between lookup and update.
+export const buildOwnedChannelBindingFilter = (
+  context: ChannelBindingContext,
+  guildId: string,
+  channelId: string,
+) => {
+  const sameRuntime =
+    context.runtimeKind === "hermes"
+      ? { runtimeKind: "hermes" }
+      : {
+          $or: [
+            { runtimeKind: "openclaw" },
+            { runtimeKind: { $exists: false } },
+          ],
+        };
+
+  return {
+    discordGuildId: guildId,
+    discordChannelId: channelId,
+    $or: [
+      { enabled: { $ne: true } },
+      {
+        tenantId: context.tenantId,
+        assistantId: context.assistantId,
+        ...sameRuntime,
+      },
+    ],
+  };
+};
+
+export const buildAssistantBindingScope = (
+  assistantId: string,
+  context?: ChannelBindingContext,
+) => {
+  if (!context) {
+    return { assistantId, enabled: true };
+  }
+
+  const identity = {
+    tenantId: context.tenantId,
+    assistantId: context.assistantId,
+    enabled: true,
+  };
+
+  if (context.runtimeKind === "hermes") {
+    return { ...identity, runtimeKind: "hermes" };
+  }
+
+  // Bindings created before runtimeKind was introduced are OpenClaw. Keep
+  // those channels working while still excluding explicitly-Hermes rows.
+  return {
+    ...identity,
+    $or: [
+      { runtimeKind: "openclaw" },
+      { runtimeKind: { $exists: false } },
+    ],
+  };
 };
 
 export const applyChannelCreateMarkers = async (
@@ -79,22 +160,25 @@ export const applyChannelCreateMarkers = async (
       if (bindingContext) {
         try {
           await DiscordAssistantBinding.findOneAndUpdate(
-            { discordGuildId: guildId, discordChannelId: found.id },
+            buildOwnedChannelBindingFilter(bindingContext, guildId, found.id),
             {
-              $set: {
-                tenantId: bindingContext.tenantId,
-                assistantId: bindingContext.assistantId,
-                assistantName: bindingContext.assistantName,
-                openclawUrl: bindingContext.openclawUrl,
-                discordGuildId: guildId,
-                discordChannelId: found.id,
-                enabled: true,
-                responseMode: "all_messages",
-              },
+              $set: buildChannelBindingUpdate(
+                bindingContext,
+                guildId,
+                found.id,
+              ),
             },
             { upsert: true },
           );
-        } catch { /* non-fatal */ }
+        } catch (bindErr) {
+          log?.("discord reused channel binding skipped (non-fatal)", {
+            guildId,
+            name,
+            channelId: found.id,
+            error:
+              bindErr instanceof Error ? bindErr.message : String(bindErr),
+          });
+        }
       }
       continue;
     }
@@ -108,18 +192,13 @@ export const applyChannelCreateMarkers = async (
       if (bindingContext) {
         try {
           await DiscordAssistantBinding.findOneAndUpdate(
-            { discordGuildId: guildId, discordChannelId: channel.id },
+            buildOwnedChannelBindingFilter(bindingContext, guildId, channel.id),
             {
-              $set: {
-                tenantId: bindingContext.tenantId,
-                assistantId: bindingContext.assistantId,
-                assistantName: bindingContext.assistantName,
-                openclawUrl: bindingContext.openclawUrl,
-                discordGuildId: guildId,
-                discordChannelId: channel.id,
-                enabled: true,
-                responseMode: "all_messages",
-              },
+              $set: buildChannelBindingUpdate(
+                bindingContext,
+                guildId,
+                channel.id,
+              ),
             },
             { upsert: true },
           );
@@ -207,15 +286,19 @@ export const applyChannelPostMarkers = async (
     .trim();
 
   // The guild(s) this assistant is bound to — never post outside its own server.
-  const bindings = await DiscordAssistantBinding.find({
-    assistantId,
-    enabled: true,
-  })
-    .select("discordGuildId")
+  const bindings = await DiscordAssistantBinding.find(
+    buildAssistantBindingScope(assistantId, bindingContext),
+  )
+    .select("discordGuildId discordChannelId")
     .lean();
   const guilds = [
     ...new Set(bindings.map((b) => b.discordGuildId).filter(Boolean) as string[]),
   ];
+  const allowedChannelIds = new Set(
+    bindings
+      .map((binding) => binding.discordChannelId)
+      .filter(Boolean) as string[],
+  );
   if (guilds.length === 0) {
     log?.("post-channel: assistant has no active binding");
     return { text: stripped, note: "" };
@@ -235,6 +318,7 @@ export const applyChannelPostMarkers = async (
   const resolveChannel = async (target: string): Promise<string | null> => {
     const t = target.trim().replace(/^#/, "");
     if (/^\d{5,25}$/.test(t)) {
+      if (!allowedChannelIds.has(t)) return null;
       try {
         const ch = await getDiscordChannel(t);
         if (ch.guild_id && guilds.includes(ch.guild_id)) return t;
@@ -246,7 +330,9 @@ export const applyChannelPostMarkers = async (
     const norm = t.toLowerCase().replace(/\s+/g, "-");
     for (const g of guilds) {
       const found = (await listGuild(g)).find(
-        (c) => (c.name || "").toLowerCase() === norm,
+        (c) =>
+          allowedChannelIds.has(c.id) &&
+          (c.name || "").toLowerCase() === norm,
       );
       if (found) return found.id;
     }

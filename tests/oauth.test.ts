@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { afterEach, test } from "node:test";
 import express from "express";
 import type { Server } from "node:http";
@@ -12,8 +13,12 @@ import {
 import {
   defaultBotPermissions,
   hasAdministratorPermission,
+  hasRequiredBotPermissions,
 } from "../src/discord/permissions.js";
-import { createDiscordOAuthRouter } from "../src/routes/discordOAuth.js";
+import {
+  createDiscordOAuthRouter,
+  validateOAuthStartSignature,
+} from "../src/routes/discordOAuth.js";
 
 const originalEnv = { ...env };
 
@@ -32,15 +37,17 @@ const withValidEnv = () => {
     DISCORD_PUBLIC_KEY: "public-key",
     DISCORD_BOT_TOKEN: "bot-token",
     DISCORD_REDIRECT_URI: "http://localhost:3001/discord/oauth/callback",
-    DISCORD_BOT_PERMISSIONS: "8",
+    DISCORD_BOT_PERMISSIONS: defaultBotPermissions,
     ENABLE_MOCK_OPENCLAW: "false",
     ERXES_GATEWAY_ADMIN_SECRET: "local-secret",
   });
 };
 
-test("default Discord bot permission is Administrator", () => {
-  assert.equal(defaultBotPermissions, "8");
-  assert.equal(hasAdministratorPermission(defaultBotPermissions), true);
+test("default Discord bot permissions are least-privilege and retain legacy Administrator compatibility", () => {
+  assert.equal(defaultBotPermissions, "274878024720");
+  assert.equal(hasRequiredBotPermissions(defaultBotPermissions), true);
+  assert.equal(hasAdministratorPermission(defaultBotPermissions), false);
+  assert.equal(hasRequiredBotPermissions("8"), true);
 });
 
 test("invalid Discord permission strings fail validation", () => {
@@ -50,6 +57,9 @@ test("invalid Discord permission strings fail validation", () => {
 
   env.DISCORD_BOT_PERMISSIONS = "-8";
   assert.throws(() => validateEnv(), /Invalid DISCORD_BOT_PERMISSIONS/);
+
+  env.DISCORD_BOT_PERMISSIONS = "4";
+  assert.throws(() => validateEnv(), /required channel and message permissions/);
 });
 
 test("OAuth install URL contains required Discord install parameters", () => {
@@ -59,7 +69,7 @@ test("OAuth install URL contains required Discord install parameters", () => {
 
   assert.deepEqual([...discordOAuthScopes], ["bot", "applications.commands"]);
   assert.equal(url.searchParams.get("scope"), "bot applications.commands");
-  assert.equal(url.searchParams.get("permissions"), "8");
+  assert.equal(url.searchParams.get("permissions"), defaultBotPermissions);
   assert.equal(url.searchParams.get("integration_type"), "0");
   assert.equal(
     url.searchParams.get("redirect_uri"),
@@ -192,7 +202,10 @@ test("return URL always allows localhost and 127.0.0.1 for local dev", () => {
 });
 
 type CallbackDepsOverrides = Partial<{
-  exchangeDiscordOAuthCode: (code: string) => Promise<{ access_token?: string }>;
+  exchangeDiscordOAuthCode: (code: string) => Promise<{
+    access_token?: string;
+    guild?: { id: string; name?: string };
+  }>;
   getDiscordOAuthMe: (
     accessToken: string,
   ) => Promise<{
@@ -226,7 +239,10 @@ const requestCallback = async (
     },
     exchangeDiscordOAuthCode:
       overrides.exchangeDiscordOAuthCode ??
-      (async () => ({ access_token: "access-token" })),
+      (async () => ({
+        access_token: "access-token",
+        guild: { id: "guild-1", name: "Guild One" },
+      })),
     getDiscordOAuthMe:
       overrides.getDiscordOAuthMe ??
       (async () => ({
@@ -286,17 +302,20 @@ test("OAuth callback rejects inaccessible guild", async () => {
   assert.ok(redirect?.includes("message=discord-guild-inaccessible"));
 });
 
-test("OAuth callback rejects permissions without Administrator", async () => {
+test("OAuth callback rejects permissions missing the required bot capabilities", async () => {
   const { response, writes } = await requestCallback("&code=code-1&permissions=4");
   const redirect = response.headers.get("location");
 
   assert.equal(response.status, 302);
   assert.equal(writes.length, 0);
-  assert.ok(redirect?.includes("message=missing-administrator-permission"));
+  assert.ok(redirect?.includes("message=missing-required-bot-permissions"));
 });
 
 test("OAuth callback rejects missing guild install details", async () => {
-  const { response, writes } = await requestCallback("&code=code-1&permissions=8");
+  const { response, writes } = await requestCallback(
+    "&code=code-1&permissions=8",
+    { exchangeDiscordOAuthCode: async () => ({ access_token: "access-token" }) },
+  );
   const redirect = response.headers.get("location");
 
   assert.equal(response.status, 302);
@@ -304,24 +323,63 @@ test("OAuth callback rejects missing guild install details", async () => {
   assert.ok(redirect?.includes("message=missing-discord-guild"));
 });
 
-test("OAuth callback saves connected installation after verified admin install", async () => {
+test("OAuth callback rejects a guild hint that differs from the token response", async () => {
   const { response, writes } = await requestCallback(
-    "&code=code-1&permissions=8&guild_id=guild-1",
+    "&code=code-1&permissions=8&guild_id=other-guild",
+  );
+  const redirect = response.headers.get("location");
+
+  assert.equal(response.status, 302);
+  assert.equal(writes.length, 0);
+  assert.ok(redirect?.includes("message=discord-guild-mismatch"));
+});
+
+test("OAuth start claims require a valid short-lived server signature", () => {
+  const claims = {
+    tenantId: "tenant-1",
+    assistantId: "assistant-1",
+    erxesUserId: "user-1",
+    returnUrl: "http://localhost:3000/agent/hermes/assistant-1",
+    expiresAt: String(Math.floor(Date.now() / 1000) + 600),
+  };
+  const signature = createHmac("sha256", "local-secret")
+    .update(Object.values(claims).join("\n"))
+    .digest("hex");
+
+  assert.equal(
+    validateOAuthStartSignature(claims, signature, "local-secret"),
+    true,
+  );
+  assert.equal(
+    validateOAuthStartSignature(
+      { ...claims, tenantId: "another-tenant" },
+      signature,
+      "local-secret",
+    ),
+    false,
+  );
+});
+
+test("OAuth callback saves connected installation after least-privilege install", async () => {
+  const { response, writes } = await requestCallback(
+    `&code=code-1&permissions=${defaultBotPermissions}&guild_id=guild-1`,
   );
   const redirect = response.headers.get("location");
 
   assert.equal(response.status, 302);
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0], {
-    tenantId: "tenant-1",
-    assistantId: "assistant-1",
-    discordGuildId: "guild-1",
-    discordGuildName: "Guild One",
-    installedByDiscordUserId: "discord-user-1",
-    installedByErxesUserId: "user-1",
-    status: "connected",
-    scopes: ["bot", "applications.commands"],
-    permissions: "8",
+    $set: {
+      tenantId: "tenant-1",
+      discordGuildId: "guild-1",
+      discordGuildName: "Guild One",
+      installedByDiscordUserId: "discord-user-1",
+      installedByErxesUserId: "user-1",
+      status: "connected",
+      scopes: ["bot", "applications.commands"],
+      permissions: defaultBotPermissions,
+    },
+    $unset: { assistantId: 1 },
   });
   assert.ok(redirect?.includes("discordConnection=success"));
 });

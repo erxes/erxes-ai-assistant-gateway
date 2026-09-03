@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 
 import {
   defaultBotPermissions,
+  hasRequiredBotPermissions,
   isValidDiscordPermissionInteger,
 } from "../discord/permissions.js";
 
@@ -121,6 +122,12 @@ export const validateEnv = () => {
   if (!isValidDiscordPermissionInteger(env.DISCORD_BOT_PERMISSIONS)) {
     throw new Error(
       "Invalid DISCORD_BOT_PERMISSIONS: expected a decimal non-negative integer string",
+    );
+  }
+
+  if (!hasRequiredBotPermissions(env.DISCORD_BOT_PERMISSIONS)) {
+    throw new Error(
+      "Invalid DISCORD_BOT_PERMISSIONS: required channel and message permissions are missing",
     );
   }
 
