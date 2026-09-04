@@ -2,8 +2,13 @@ import { Router } from "express";
 import mongoose from "mongoose";
 
 import { getDiscordGuildChannels } from "../discord/api.js";
+import { getLiveDiscordGuildIds } from "../discord/messageGateway.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
-import { badRequest, notFound } from "../lib/errors.js";
+import {
+  badRequest,
+  notFound,
+  serviceUnavailable,
+} from "../lib/errors.js";
 import { ShortCache } from "../lib/shortCache.js";
 import { DiscordInstallation } from "../models/DiscordInstallation.js";
 import { requireAdminSecret } from "./adminAuth.js";
@@ -18,7 +23,6 @@ const getQueryString = (value: unknown) =>
 const textChannelTypes = new Set([0, 5]);
 const adminCacheTtlMs = 45_000;
 
-const installationsCache = new ShortCache<unknown[]>(adminCacheTtlMs);
 const channelsCache = new ShortCache<
   Array<{
     id: string;
@@ -64,6 +68,13 @@ export const assertInstallationListScope = (
   }
 };
 
+export const filterLiveDiscordInstallations = <
+  T extends { discordGuildId: string },
+>(installations: T[], liveGuildIds: ReadonlySet<string>) =>
+  installations.filter((installation) =>
+    liveGuildIds.has(installation.discordGuildId),
+  );
+
 adminInstallationsRouter.use(requireAdminSecret);
 
 adminInstallationsRouter.get(
@@ -73,13 +84,25 @@ adminInstallationsRouter.get(
 
     assertInstallationListScope(query);
 
-    const cacheKey = JSON.stringify(query);
+    const liveGuildIds = getLiveDiscordGuildIds();
 
-    const installations = await installationsCache.getOrLoad(cacheKey, () =>
-      DiscordInstallation.find(query).sort({ updatedAt: -1 }).limit(200).lean(),
-    );
+    if (!liveGuildIds) {
+      throw serviceUnavailable(
+        "Discord is reconnecting. Refresh the server list in a moment.",
+      );
+    }
 
-    res.json({ installations });
+    const installations = await DiscordInstallation.find(query)
+      .sort({ updatedAt: -1 })
+      .limit(200)
+      .lean();
+
+    res.json({
+      installations: filterLiveDiscordInstallations(
+        installations,
+        liveGuildIds,
+      ),
+    });
   }),
 );
 
