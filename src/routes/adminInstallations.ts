@@ -34,7 +34,11 @@ export const buildInstallationListQuery = (
 ): Record<string, string> => {
   const query: Record<string, string> = {};
 
-  for (const field of ["tenantId", "status"] as const) {
+  for (const field of [
+    "tenantId",
+    "installedByErxesUserId",
+    "status",
+  ] as const) {
     const value = getQueryString(input[field]);
 
     if (value) {
@@ -50,6 +54,16 @@ export const buildInstallationListQuery = (
   return query;
 };
 
+export const assertInstallationListScope = (
+  query: Record<string, string>,
+) => {
+  if (!query.tenantId || !query.installedByErxesUserId) {
+    throw badRequest(
+      "tenantId and installedByErxesUserId are required to list installations",
+    );
+  }
+};
+
 adminInstallationsRouter.use(requireAdminSecret);
 
 adminInstallationsRouter.get(
@@ -57,10 +71,9 @@ adminInstallationsRouter.get(
   asyncHandler(async (req, res) => {
     const query = buildInstallationListQuery(req.query);
 
-    const cacheKey = JSON.stringify({
-      tenantId: query.tenantId ?? "",
-      status: query.status ?? "",
-    });
+    assertInstallationListScope(query);
+
+    const cacheKey = JSON.stringify(query);
 
     const installations = await installationsCache.getOrLoad(cacheKey, () =>
       DiscordInstallation.find(query).sort({ updatedAt: -1 }).limit(200).lean(),
