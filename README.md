@@ -224,7 +224,7 @@ curl -X POST http://localhost:3001/api/bindings \
 List installations, channels, and bindings:
 
 ```bash
-curl "http://localhost:3001/api/installations?tenantId=test-saas-1" \
+curl "http://localhost:3001/api/installations?tenantId=test-saas-1&installedByErxesUserId=user-1" \
   -H 'x-erxes-gateway-admin-secret: change-me'
 
 curl "http://localhost:3001/api/installations/<installation-object-id>/channels" \
@@ -260,6 +260,11 @@ DELETE /api/bindings/:id
 POST /api/bindings/rehome
 POST /api/bindings/disable-by-url
 ```
+
+Installation listing requires both `tenantId` and
+`installedByErxesUserId`. This keeps one user's Discord servers reusable by
+that user's OpenClaw and Hermes assistants without exposing them to other
+users in the same tenant.
 
 Hermes lifecycle callers include `runtimeKind: "hermes"` in the rehome and
 disable-by-url request bodies. The field is optional so existing OpenClaw
