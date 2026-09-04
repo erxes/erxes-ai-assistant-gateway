@@ -187,6 +187,14 @@ let startedClient: Client | null = null;
 
 export const getDiscordMessageGatewayStatus = () => ({ ...status });
 
+export const getLiveDiscordGuildIds = (): ReadonlySet<string> | null => {
+  if (!status.enabled || !status.connected || !startedClient?.isReady()) {
+    return null;
+  }
+
+  return new Set(startedClient.guilds.cache.keys());
+};
+
 export const createTtlMessageCache = (
   ttlMs = PROCESSED_MESSAGE_TTL_MS,
   maxSize = PROCESSED_MESSAGE_MAX_SIZE,

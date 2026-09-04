@@ -264,7 +264,10 @@ POST /api/bindings/disable-by-url
 Installation listing requires both `tenantId` and
 `installedByErxesUserId`. This keeps one user's Discord servers reusable by
 that user's OpenClaw and Hermes assistants without exposing them to other
-users in the same tenant.
+users in the same tenant. The result is also intersected with the connected
+Discord bot's live guild cache, so deleted servers and servers where the bot
+was removed do not appear. While Discord is reconnecting, the route returns
+`503` instead of serving stale installation records.
 
 Hermes lifecycle callers include `runtimeKind: "hermes"` in the rehome and
 disable-by-url request bodies. The field is optional so existing OpenClaw
