@@ -10,6 +10,7 @@ import { adminInstallationsRouter } from "./routes/adminInstallations.js";
 import { discordInteractionsRouter } from "./routes/discordInteractions.js";
 import { discordOAuthRouter } from "./routes/discordOAuth.js";
 import { cronWebhookRouter } from "./routes/cronWebhook.js";
+import { discordFollowupRouter } from "./routes/discordFollowup.js";
 import { healthRouter } from "./routes/health.js";
 import { mockOpenClawRouter } from "./routes/mockOpenClaw.js";
 
@@ -29,6 +30,7 @@ export const createApp = () => {
 
   app.use("/discord/oauth", discordOAuthRouter);
   app.use("/webhooks", cronWebhookRouter);
+  app.use("/webhooks", discordFollowupRouter);
   app.use("/api/installations", adminInstallationsRouter);
   app.use("/api/bindings", adminBindingsRouter);
 

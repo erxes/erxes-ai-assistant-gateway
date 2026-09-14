@@ -166,6 +166,46 @@ export const sendChannelMessage = (channelId: string, content: string) =>
     },
   });
 
+export const sendChannelMessageWithFiles = async (
+  channelId: string,
+  content: string,
+  options: {
+    files?: Array<{ attachment: Buffer; name: string }>;
+    replyToMessageId?: string;
+  } = {},
+) => {
+  const payload = {
+    content: content.slice(0, 2000),
+    allowed_mentions: { parse: [] },
+    ...(options.replyToMessageId
+      ? { message_reference: { message_id: options.replyToMessageId, fail_if_not_exists: false } }
+      : {}),
+  };
+  const url = `${discordApiBaseUrl}/channels/${channelId}/messages`;
+  const headers: Record<string, string> = {
+    Authorization: `Bot ${requireEnv("DISCORD_BOT_TOKEN")}`,
+  };
+  let response: Response;
+  if (options.files && options.files.length > 0) {
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify(payload));
+    options.files.slice(0, 5).forEach((file, index) => {
+      form.append(`files[${index}]`, new Blob([new Uint8Array(file.attachment)]), file.name);
+    });
+    response = await fetch(url, { method: "POST", headers, body: form });
+  } else {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Failed to post Discord channel message: ${response.status} ${body.slice(0, 200)}`);
+  }
+};
+
 export type DiscordOAuthTokenResponse = {
   access_token?: string;
   token_type?: string;
