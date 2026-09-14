@@ -37,8 +37,9 @@ export const SUPPORTED_FILE_TYPES = new Set([
   "text/csv",
   "application/json",
   "text/html",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  // pptx and docx are NOT here: the runtime rejects them as input_file
+  // ("Unsupported file MIME type"), so messageGateway inlines their text
+  // via presentations.ts / documents.ts instead.
 ]);
 
 // OpenClaw enforces 10MB for images and 5MB for files; stay below both.
