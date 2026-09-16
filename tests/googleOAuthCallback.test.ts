@@ -26,3 +26,21 @@ test("the result page escapes the message and never echoes a code or state", () 
   assert.ok(!html.includes("<script>alert"));
   assert.ok(renderResultPage(true, "ok").includes("Google Drive connected"));
 });
+
+test("the result page is branded and names the assistant it connected", () => {
+  // The customer arrives here from Google's unverified-app warning, so a page
+  // with no erxes mark and no assistant name is indistinguishable from phishing.
+  const html = renderResultPage(true, "ok", "assistant-purify-test");
+  assert.ok(html.includes("erxes AI Assistant"));
+  assert.ok(html.includes("<svg"), "the mark is inlined, not fetched");
+  assert.ok(!html.includes("<img"), "no external asset that can fail to load");
+  assert.ok(html.includes("<strong>purify-test</strong>"), "namespace prefix is dropped");
+  // A failure page has no assistant to name and must not invent one.
+  assert.ok(!renderResultPage(false, "nope").includes("Connected to your assistant"));
+});
+
+test("the assistant name is escaped like any other untrusted value", () => {
+  const html = renderResultPage(true, "ok", "assistant-<script>alert(1)</script>");
+  assert.ok(!html.includes("<script>alert"));
+  assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
+});
