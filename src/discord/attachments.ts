@@ -70,6 +70,31 @@ export const normalizeContentType = (value: unknown): string => {
   return value.split(";")[0]?.trim().toLowerCase() ?? "";
 };
 
+// Discord sometimes delivers an attachment with no content type at all
+// (2026-09-22: a customer's photo arrived twice as contentType "" and was
+// dropped as unsupported both times). The extension is then the only signal.
+const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  html: "text/html",
+  htm: "text/html",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+export const inferContentTypeFromFilename = (filename: string): string => {
+  const extension = filename.toLowerCase().split(".").pop() ?? "";
+  return CONTENT_TYPE_BY_EXTENSION[extension] ?? "";
+};
+
 export const isAllowedDiscordAttachmentUrl = (value: unknown): boolean => {
   if (typeof value !== "string" || !value) {
     return false;
@@ -109,7 +134,9 @@ export const normalizeDiscordAttachments = (
 
   for (const attachment of raw) {
     const filename = sanitizeAttachmentFilename(attachment.filename);
-    const contentType = normalizeContentType(attachment.contentType);
+    const contentType =
+      normalizeContentType(attachment.contentType) ||
+      inferContentTypeFromFilename(filename);
     const size = Number(attachment.size) || 0;
 
     const isImage = SUPPORTED_IMAGE_TYPES.has(contentType);
