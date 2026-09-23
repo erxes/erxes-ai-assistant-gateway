@@ -399,10 +399,10 @@ test("plain text chat without attachments is unchanged", async () => {
 test("normalizeDiscordAttachments infers the type from the extension when Discord sends none", () => {
   const { supported, skipped } = normalizeDiscordAttachments([
     { filename: "IMG_4021.jpg", contentType: "", size: 120_000, url: "https://cdn.discordapp.com/attachments/1/2/IMG_4021.jpg" },
-    { filename: "deck.pptx", contentType: null, size: 300_000, url: "https://cdn.discordapp.com/attachments/1/2/deck.pptx" },
+    { filename: "notes.txt", contentType: null, size: 3_000, url: "https://cdn.discordapp.com/attachments/1/2/notes.txt" },
     { filename: "photo.heic", contentType: "", size: 120_000, url: "https://cdn.discordapp.com/attachments/1/2/photo.heic" },
   ]);
-  assert.deepEqual(supported.map((a) => a.contentType), ["image/jpeg", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]);
+  assert.deepEqual(supported.map((a) => a.contentType), ["image/jpeg", "text/plain"]);
   assert.deepEqual(skipped.map((a) => a.filename), ["photo.heic"]);
 });
 
