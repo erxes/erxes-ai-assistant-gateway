@@ -165,6 +165,7 @@ cronWebhookRouter.post(
     const channelRef = String(req.query.channel ?? req.query.channelId ?? "")
       .trim()
       .replace(/^#/, "");
+    const hostRef = String(req.query.host ?? "").trim().toLowerCase();
 
     if (!env.CRON_WEBHOOK_SECRET) {
       res.status(503).json({ error: "cron webhook not configured" });
@@ -181,8 +182,37 @@ cronWebhookRouter.post(
       return;
     }
 
+    // Assistants provisioned since 2026-08 sign the cron webhook with the
+    // runtime HOST rather than the erxes assistantId: the deployer does not
+    // reliably know that id, but the host is the binding's stable key. Without
+    // this branch every such delivery 401s, which silently dropped every
+    // scheduled report between 2026-08-04 and 2026-09-10.
+    let hostScopeAssistantId = "";
+    if (!assistantId.trim() && hostRef) {
+      const expectedHostToken = crypto
+        .createHmac("sha256", env.CRON_WEBHOOK_SECRET)
+        .update(hostRef)
+        .digest("hex")
+        .slice(0, 32);
+      if (!token || !safeEqual(token, expectedHostToken)) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      const hostBinding = await DiscordAssistantBinding.findOne({
+        openclawUrl: { $in: [`https://${hostRef}`, `https://${hostRef}/`] },
+        enabled: true,
+      })
+        .select("assistantId")
+        .lean();
+      if (!hostBinding?.assistantId) {
+        res.status(404).json({ error: "assistant not bound" });
+        return;
+      }
+      hostScopeAssistantId = hostBinding.assistantId;
+    }
+
     const scope: DiscordCronScope = {
-      assistantId: assistantId.trim(),
+      assistantId: (assistantId || hostScopeAssistantId).trim(),
       ...(hasScopedIdentity
         ? {
             tenantId,
@@ -191,7 +221,10 @@ cronWebhookRouter.post(
         : {}),
     };
 
-    if (!scope.assistantId || !validateDiscordCronToken(token, scope)) {
+    if (
+      !scope.assistantId ||
+      (!hostScopeAssistantId && !validateDiscordCronToken(token, scope))
+    ) {
       res.status(401).json({ error: "unauthorized" });
       return;
     }
@@ -236,7 +269,7 @@ cronWebhookRouter.post(
       }
       if (!channelId) {
         logger.info("cron-webhook: channel id not in assistant's guild (denied)", {
-          assistantId,
+          assistantId: scope.assistantId,
           channelRef,
         });
         res.status(403).json({ error: "channel is not in this assistant's server" });
@@ -261,7 +294,7 @@ cronWebhookRouter.post(
       }
       if (!channelId) {
         logger.info("cron-webhook: channel name not found in assistant's guild", {
-          assistantId,
+          assistantId: scope.assistantId,
           channelRef,
         });
         res

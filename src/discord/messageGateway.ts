@@ -86,7 +86,27 @@ type MessageGatewayDeps = {
   logger: typeof logger;
   runLongOperationJob?: (request: LongOperationJobRequest) => Promise<unknown>;
   fetchRuntimeFile?: typeof downloadRuntimeGeneratedFile;
+  guildHasAssistant?: (guildId: string) => Promise<boolean>;
 };
+
+// A channel created by hand in Discord has no binding, so its messages were
+// dropped without a word and users thought the assistant was broken. In a
+// server that already has a connected assistant, explain once per channel.
+export const UNBOUND_CHANNEL_NOTICE =
+  "This channel is not connected to an assistant, so I can't answer here. " +
+  "Ask your assistant in a connected channel to create a new channel for you, " +
+  "and it will be connected automatically.";
+const UNBOUND_NOTICE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const unboundNoticeSentAt = new Map<string, number>();
+
+export const shouldSendUnboundNotice = (channelId: string, now = Date.now()) => {
+  const last = unboundNoticeSentAt.get(channelId);
+  if (last !== undefined && now - last < UNBOUND_NOTICE_INTERVAL_MS) return false;
+  unboundNoticeSentAt.set(channelId, now);
+  return true;
+};
+
+export const resetUnboundNoticesForTests = () => unboundNoticeSentAt.clear();
 
 export const buildRuntimeFilePayloads = async (
   openclawUrl: string,
@@ -347,6 +367,13 @@ export const handleDiscordMessage = async (
   });
 
   if (!binding) {
+    if (
+      deps.guildHasAssistant &&
+      (await deps.guildHasAssistant(guildId).catch(() => false)) &&
+      shouldSendUnboundNotice(target.bindingChannelId)
+    ) {
+      await message.reply({ content: UNBOUND_CHANNEL_NOTICE }).catch(() => undefined);
+    }
     return;
   }
 
@@ -861,6 +888,14 @@ export const startDiscordMessageGateway = async () => {
             enabled: true,
             responseMode: "all_messages",
           }),
+        guildHasAssistant: async (nextGuildId) =>
+          Boolean(
+            await DiscordAssistantBinding.exists({
+              discordGuildId: nextGuildId,
+              enabled: true,
+              responseMode: "all_messages",
+            }),
+          ),
       }),
     );
   });
