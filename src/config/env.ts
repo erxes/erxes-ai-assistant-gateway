@@ -52,6 +52,12 @@ export const env = {
     1800,
   ),
   OPENCLAW_SHARED_SECRET: process.env.OPENCLAW_SHARED_SECRET ?? "",
+  // Hibernation wake-up: when a runtime is unreachable (scaled to 0), the
+  // retry loop asks the deployer to wake it. Empty secret = feature off, so
+  // deploying this code without the env set changes nothing.
+  MANAGED_DEPLOYER_URL:
+    process.env.MANAGED_DEPLOYER_URL ?? "https://deployer.erxes.io",
+  MANAGED_DEPLOYER_SECRET: process.env.MANAGED_DEPLOYER_SECRET ?? "",
   // Delivery-only token for the cron->channel webhook. Separate from the runtime
   // shared secret so a model emitting it in a cron URL can't leak real config.
   CRON_WEBHOOK_SECRET: process.env.CRON_WEBHOOK_SECRET ?? "",
