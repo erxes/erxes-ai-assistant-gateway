@@ -55,6 +55,7 @@ export const env = {
   // Delivery-only token for the cron->channel webhook. Separate from the runtime
   // shared secret so a model emitting it in a cron URL can't leak real config.
   CRON_WEBHOOK_SECRET: process.env.CRON_WEBHOOK_SECRET ?? "",
+  DEPLOYER_URL: process.env.DEPLOYER_URL ?? "http://65.109.4.175:4200",
   ASSISTANT_JOB_POLL_INTERVAL_MS: toNumber(
     process.env.ASSISTANT_JOB_POLL_INTERVAL_MS,
     5_000,
