@@ -202,12 +202,20 @@ export const runDiscordAssistantJob = async (
     }
   }
 
-  const ackDeadline = startedAt + (params.ackDelayMs ?? 10_000);
+  const ackDeadline = startedAt + (params.ackDelayMs ?? 60_000);
+  // The "Still working" note is removed once the answer is posted, so the
+  // channel keeps only the question and the answer.
+  let delayedAck: unknown;
   const sendDelayedAckIfDue = async () => {
     if (acked || params.skipAck || ackMode !== "delayed") return;
     if (Date.now() < ackDeadline) return;
     acked = true;
-    await ack(DELAYED_ACK_MESSAGE).catch(() => undefined);
+    delayedAck = await ack(DELAYED_ACK_MESSAGE).catch(() => undefined);
+  };
+  const removeDelayedAck = async () => {
+    const note = delayedAck as { delete?: () => Promise<unknown> } | undefined;
+    delayedAck = undefined;
+    if (note && typeof note.delete === "function") await note.delete().catch(() => undefined);
   };
 
   const finish = async (
@@ -239,6 +247,8 @@ export const runDiscordAssistantJob = async (
         }
       }
     }
+
+    if (delivered && message) await removeDelayedAck();
 
     // If a "ready" answer could not be delivered, leave the job in a status
     // that resumeStaleAssistantJobs re-picks so it can be redelivered later
