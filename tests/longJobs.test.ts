@@ -772,3 +772,54 @@ test("gives up after the resubmission cap when the runtime keeps losing the job"
   assert.equal(starts, 3); // initial + 2 resubmissions
   assert.ok(notifications.length > 0, "customer told about the failure");
 });
+
+test("delayed ack mode: the 'Still working' note is deleted once the answer is posted", async () => {
+  const { store } = createMemoryStore();
+  let deleted = 0;
+  const notifications: string[] = [];
+  let polls = 0;
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async () => ({ delete: async () => { deleted += 1; } }),
+    notify: async (content) => notifications.push(content),
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => {
+      polls += 1;
+      return polls < 3
+        ? { id: "job-1", status: "running" as const, stage: "running" }
+        : { id: "job-1", status: "ready" as const, stage: "ready", answer: "slow answer" };
+    },
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    ackDelayMs: 0,
+    quiet: true,
+  });
+  assert.equal(outcome, "ready");
+  assert.deepEqual(notifications, ["slow answer"]);
+  assert.equal(deleted, 1);
+});
+
+test("delayed ack mode: a quick answer gets no 'Still working' note at the default delay", async () => {
+  const { store } = createMemoryStore();
+  const acks: string[] = [];
+  const outcome = await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store,
+    ack: async (content) => acks.push(content),
+    notify: async () => undefined,
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => ({ id: "job-1", status: "ready" as const, stage: "ready", answer: "fast" }),
+    logger: silentLogger,
+    pollIntervalMs: 1,
+    timeoutMs: 5_000,
+    ackMode: "delayed",
+    quiet: true,
+  });
+  assert.equal(outcome, "ready");
+  assert.deepEqual(acks, []);
+});

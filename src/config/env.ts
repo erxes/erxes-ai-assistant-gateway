@@ -70,9 +70,12 @@ export const env = {
     process.env.ASSISTANT_JOB_TIMEOUT_MS,
     900_000,
   ),
+  // Normal chat shows Discord's typing indicator while it works; the text
+  // note is only for replies that take over a minute (at 10 s it sat above
+  // most answers).
   ASSISTANT_NORMAL_CHAT_ACK_DELAY_MS: toNumber(
     process.env.ASSISTANT_NORMAL_CHAT_ACK_DELAY_MS,
-    10_000,
+    60_000,
   ),
   DISCORD_MESSAGE_GATEWAY_ENABLED:
     process.env.DISCORD_MESSAGE_GATEWAY_ENABLED ?? "false",
