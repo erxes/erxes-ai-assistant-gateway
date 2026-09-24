@@ -52,6 +52,8 @@ export type AskAssistantInput = {
     username?: string;
     authorDisplayName?: string;
     responseMode?: string;
+    // The assistant's main channel (its first binding in this server).
+    primaryChannel?: boolean;
     conversationId?: string;
     attachments?: Array<{
       kind: "image" | "file";

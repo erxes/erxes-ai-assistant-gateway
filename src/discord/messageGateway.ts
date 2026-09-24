@@ -1,3 +1,4 @@
+import { isPrimaryChannelBinding } from "./primaryChannel.js";
 import {
   Client,
   Events,
@@ -87,6 +88,7 @@ type MessageGatewayDeps = {
   runLongOperationJob?: (request: LongOperationJobRequest) => Promise<unknown>;
   fetchRuntimeFile?: typeof downloadRuntimeGeneratedFile;
   guildHasAssistant?: (guildId: string) => Promise<boolean>;
+  isPrimaryChannel?: (binding: DiscordAssistantBindingDocument) => Promise<boolean>;
 };
 
 // A channel created by hand in Discord has no binding, so its messages were
@@ -531,6 +533,9 @@ export const handleDiscordMessage = async (
       username: message.author.username,
       authorDisplayName: message.member?.displayName ?? undefined,
       responseMode: binding.responseMode,
+      primaryChannel: deps.isPrimaryChannel
+        ? await deps.isPrimaryChannel(binding).catch(() => false)
+        : undefined,
       conversationId,
       attachments,
     },
@@ -888,6 +893,7 @@ export const startDiscordMessageGateway = async () => {
             enabled: true,
             responseMode: "all_messages",
           }),
+        isPrimaryChannel: (nextBinding) => isPrimaryChannelBinding(nextBinding),
         guildHasAssistant: async (nextGuildId) =>
           Boolean(
             await DiscordAssistantBinding.exists({
