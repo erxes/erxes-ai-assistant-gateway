@@ -1,3 +1,4 @@
+import { isPrimaryChannelBinding } from "../discord/primaryChannel.js";
 import { Router } from "express";
 
 import { verifyDiscordRequest, type DiscordRequest } from "../discord/verifyDiscordRequest.js";
@@ -176,6 +177,7 @@ discordInteractionsRouter.post(
             userId: user.id,
             username: user.username,
             responseMode: binding.responseMode,
+            primaryChannel: await isPrimaryChannelBinding(binding),
             conversationId,
           },
         },
@@ -251,6 +253,7 @@ discordInteractionsRouter.post(
           userId: user.id,
           username: user.username,
           responseMode: binding.responseMode,
+          primaryChannel: await isPrimaryChannelBinding(binding),
           conversationId: buildDiscordConversationId({
             guildId,
             channelId: bindingChannelId,

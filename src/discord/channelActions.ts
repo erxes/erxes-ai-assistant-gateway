@@ -4,7 +4,10 @@ import {
   getDiscordGuildChannels,
   sendChannelMessage,
 } from "./api.js";
-import { DiscordAssistantBinding } from "../models/DiscordAssistantBinding.js";
+import {
+  DiscordAssistantBinding,
+  type DiscordAssistantResponseMode,
+} from "../models/DiscordAssistantBinding.js";
 import type { AssistantRuntimeKind } from "../runtime/identity.js";
 
 // The model can ask the gateway to create a Discord channel by emitting a marker
@@ -41,6 +44,7 @@ export const buildChannelBindingUpdate = (
   context: ChannelBindingContext,
   guildId: string,
   channelId: string,
+  responseMode: DiscordAssistantResponseMode = "all_messages",
 ) => ({
   tenantId: context.tenantId,
   assistantId: context.assistantId,
@@ -50,7 +54,7 @@ export const buildChannelBindingUpdate = (
   discordGuildId: guildId,
   discordChannelId: channelId,
   enabled: true,
-  responseMode: "all_messages" as const,
+  responseMode,
 });
 
 // A model-created channel may reuse an existing Discord channel, but it must

@@ -8,6 +8,8 @@ import {
   handleDiscordMessage,
   shouldIgnoreDiscordMessage,
   splitDiscordMessage,
+  UNBOUND_CHANNEL_NOTICE,
+  resetUnboundNoticesForTests,
 } from "../src/discord/messageGateway.js";
 
 const createBinding = (overrides: Record<string, unknown> = {}) =>
@@ -151,6 +153,39 @@ test("unbound channel is ignored", async () => {
     },
   });
 
+  assert.equal(fixture.replies.length, 0);
+});
+
+test("unbound channel in a server with an assistant gets one notice", async () => {
+  resetUnboundNoticesForTests();
+  const deps = {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => null,
+    guildHasAssistant: async () => true,
+    askAssistant: async () => {
+      throw new Error("should not be called");
+    },
+  };
+  const first = createMessage();
+  await handleDiscordMessage(first.message, deps);
+  const second = createMessage();
+  await handleDiscordMessage(second.message, deps);
+
+  assert.equal((first.replies[0] as any).content, UNBOUND_CHANNEL_NOTICE);
+  assert.equal(second.replies.length, 0);
+});
+
+test("unbound channel in a server without an assistant stays silent", async () => {
+  resetUnboundNoticesForTests();
+  const fixture = createMessage();
+  await handleDiscordMessage(fixture.message, {
+    logger: { error: () => undefined } as any,
+    findBinding: async () => null,
+    guildHasAssistant: async () => false,
+    askAssistant: async () => {
+      throw new Error("should not be called");
+    },
+  });
   assert.equal(fixture.replies.length, 0);
 });
 

@@ -9,6 +9,26 @@ import {
   runtimeErrorFromNetworkFailure,
   runtimeErrorFromResponse,
 } from "./errors.js";
+import { requestRuntimeWake } from "./wake.js";
+
+// Fold a hibernation wake-up into a retry chain: on the first
+// runtime_unreachable, ask the deployer to wake the (likely scaled-to-0)
+// runtime, then let the normal backoff deliver the request once it serves.
+const withWakeOnUnreachable = (
+  openclawUrl: string,
+  options?: RuntimeRetryOptions,
+): RuntimeRetryOptions => ({
+  ...options,
+  onRetry: info => {
+    if (
+      info.error instanceof OpenClawRuntimeError &&
+      info.error.category === "runtime_unreachable"
+    ) {
+      requestRuntimeWake(openclawUrl);
+    }
+    options?.onRetry?.(info);
+  },
+});
 
 export type AskAssistantInput = {
   openclawUrl: string;
@@ -32,6 +52,8 @@ export type AskAssistantInput = {
     username?: string;
     authorDisplayName?: string;
     responseMode?: string;
+    // The assistant's main channel (its first binding in this server).
+    primaryChannel?: boolean;
     conversationId?: string;
     attachments?: Array<{
       kind: "image" | "file";
@@ -248,7 +270,10 @@ export const askOpenClawAssistant = (
   input: AskAssistantInput,
   retryOptions?: RuntimeRetryOptions,
 ): Promise<AssistantAskResult> =>
-  withRuntimeRetry(() => askOpenClawAssistantOnce(input), retryOptions);
+  withRuntimeRetry(
+    () => askOpenClawAssistantOnce(input),
+    withWakeOnUnreachable(input.openclawUrl, retryOptions),
+  );
 
 const MAX_RUNTIME_FILE_DOWNLOAD_BYTES = 9 * 1024 * 1024;
 
@@ -342,7 +367,10 @@ export const startOpenClawAssistantJob = (
   input: AskAssistantInput & { jobKey: string },
   retryOptions?: RuntimeRetryOptions,
 ): Promise<AssistantRuntimeJob> =>
-  withRuntimeRetry(() => startOpenClawAssistantJobOnce(input), retryOptions);
+  withRuntimeRetry(
+    () => startOpenClawAssistantJobOnce(input),
+    withWakeOnUnreachable(input.openclawUrl, retryOptions),
+  );
 
 export const getOpenClawAssistantJob = async (
   openclawUrl: string,
