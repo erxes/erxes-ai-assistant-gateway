@@ -6,10 +6,15 @@ import {
   categorizeError,
   friendlyRuntimeErrorMessage,
   OpenClawRuntimeError,
+  REQUEST_TOO_LARGE_MESSAGE,
+  RUNTIME_ERROR_CATEGORIES,
   runtimeErrorFromNetworkFailure,
   runtimeErrorFromResponse,
 } from "../src/openclaw/errors.js";
-import { describeJobFailure } from "../src/discord/jobRunner.js";
+import {
+  describeJobFailure,
+  GENERIC_JOB_FAILURE_MESSAGE,
+} from "../src/discord/jobRunner.js";
 
 const GENERIC_FALLBACK =
   "The assistant could not respond right now. Please try again shortly.";
@@ -132,9 +137,9 @@ test("job failures map to structured messages, never the generic fallback", () =
     describeJobFailure({ category: "plugin_quarantined", error: "bad plugin" }),
     /installed but could not be loaded.*kept unloaded/i,
   );
-  assert.match(
+  assert.equal(
     describeJobFailure({ error: "some specific reason" }),
-    /The operation failed: some specific reason/,
+    GENERIC_JOB_FAILURE_MESSAGE,
   );
   assert.notEqual(describeJobFailure({}), GENERIC_FALLBACK);
 });
@@ -147,4 +152,97 @@ test("error messages never contain secret-looking content from internals", () =>
   assert.doesNotMatch(message, /Bearer/);
   assert.doesNotMatch(message, /sk-/);
   assert.doesNotMatch(message, /mongodb/);
+});
+
+const ADAPTER_CATEGORIES = [
+  "provider_busy",
+  "provider_not_connected",
+  "job_deadline",
+  "provider_quota",
+  "provider_billing",
+  "provider_auth_failed",
+  "provider_rate_limited",
+  "provider_error",
+] as const;
+
+test("adapter provider categories are recognised, not collapsed to unknown", () => {
+  for (const category of ADAPTER_CATEGORIES) {
+    assert.ok((RUNTIME_ERROR_CATEGORIES as readonly string[]).includes(category));
+    const error = runtimeErrorFromResponse(
+      503,
+      JSON.stringify({ error: "internal detail", category }),
+    );
+    assert.equal(error.category, category);
+    const message = friendlyRuntimeErrorMessage(error, "ref9");
+    assert.match(message, /\(ref ref9\)/);
+    assert.doesNotMatch(message, /internal detail/);
+    assert.doesNotMatch(message, /unexpected error/);
+  }
+});
+
+test("adapter safeMessage wins over the provider category fallback", () => {
+  const error = runtimeErrorFromResponse(
+    429,
+    JSON.stringify({
+      error: "concurrent request limit",
+      category: "provider_busy",
+      safeMessage: "Your Kimi key is busy with another assistant.",
+    }),
+  );
+  assert.equal(
+    friendlyRuntimeErrorMessage(error, "ref4"),
+    "Your Kimi key is busy with another assistant. (ref ref4)",
+  );
+});
+
+test("a provider category on a 401/402 keeps its own message", () => {
+  const error = runtimeErrorFromResponse(
+    402,
+    JSON.stringify({ error: "x", category: "provider_quota" }),
+  );
+  assert.match(friendlyRuntimeErrorMessage(error, "r"), /quota/i);
+});
+
+test("an oversized request says so instead of asking to rephrase", () => {
+  const error = runtimeErrorFromResponse(
+    400,
+    JSON.stringify({ error: "Request body is too large", category: "invalid_request" }),
+  );
+  const message = friendlyRuntimeErrorMessage(error, "ref5");
+  assert.equal(message, `${REQUEST_TOO_LARGE_MESSAGE} (ref ref5)`);
+  assert.match(message, /smaller file|split/i);
+  assert.doesNotMatch(message, /rephrase/i);
+
+  assert.equal(runtimeErrorFromResponse(413, "").category, "invalid_request");
+  assert.match(
+    friendlyRuntimeErrorMessage(runtimeErrorFromResponse(413, ""), "r"),
+    /too large/,
+  );
+  // Other invalid requests keep the rephrase guidance.
+  assert.match(
+    friendlyRuntimeErrorMessage(
+      runtimeErrorFromResponse(400, JSON.stringify({ error: "bad", category: "invalid_request" })),
+      "r",
+    ),
+    /rephrase/,
+  );
+});
+
+test("job failures never leak the raw runtime error", () => {
+  const raw = "ENOENT /root/.openclaw/agents/main Bearer abc sk-kimi-123";
+  for (const status of [
+    { error: raw },
+    { error: raw, category: "unknown" },
+    { error: raw, category: "not_a_category" },
+    { error: raw, category: "job_failed" },
+    { error: raw, category: "provider_busy" },
+  ]) {
+    const message = describeJobFailure(status);
+    assert.doesNotMatch(message, /ENOENT|Bearer|sk-kimi|\/root/);
+  }
+  assert.match(describeJobFailure({ error: raw, category: "provider_busy" }), /busy/i);
+  assert.equal(
+    describeJobFailure({ error: "Request body is too large" }),
+    REQUEST_TOO_LARGE_MESSAGE,
+  );
 });

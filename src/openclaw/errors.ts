@@ -8,12 +8,20 @@ export const RUNTIME_ERROR_CATEGORIES = [
   "tool_execution_failed",
   "job_failed",
   "invalid_request",
+  "provider_busy",
+  "provider_not_connected",
+  "job_deadline",
+  "provider_quota",
+  "provider_billing",
+  "provider_auth_failed",
+  "provider_rate_limited",
+  "provider_error",
   "unknown",
 ] as const;
 
 export type RuntimeErrorCategory = (typeof RUNTIME_ERROR_CATEGORIES)[number];
 
-const isCategory = (value: unknown): value is RuntimeErrorCategory =>
+export const isCategory = (value: unknown): value is RuntimeErrorCategory =>
   typeof value === "string" &&
   (RUNTIME_ERROR_CATEGORIES as readonly string[]).includes(value);
 
@@ -57,6 +65,7 @@ const categoryFromStatus = (status: number): RuntimeErrorCategory => {
     return "runtime_unreachable";
   }
   if (status === 504 || status === 408) return "provider_timeout";
+  if (status === 413) return "invalid_request";
   return "unknown";
 };
 
@@ -146,8 +155,40 @@ const CATEGORY_MESSAGES: Record<RuntimeErrorCategory, string> = {
   job_failed: "The operation failed before completing. Please retry.",
   invalid_request:
     "I couldn't process that request format. Please rephrase and try again.",
+  provider_busy:
+    "The AI provider is busy with another request on this key right now. Please try again in a minute.",
+  provider_not_connected:
+    "The assistant's AI provider is not connected yet. The workspace admin can finish connecting it in erxes.",
+  job_deadline:
+    "This request ran longer than the time allowed and was stopped. Please try again, or split it into smaller steps.",
+  provider_quota:
+    "The assistant's AI provider quota is used up. The workspace admin can raise the limit or wait for it to reset.",
+  provider_billing:
+    "The assistant's AI provider plan or billing needs attention. The workspace admin can renew the plan in the provider account.",
+  provider_auth_failed:
+    "The assistant's AI provider key isn't working, usually an expired key or a lapsed plan. The workspace admin can update the key in erxes.",
+  provider_rate_limited:
+    "The AI provider is rate limiting requests right now. Please try again in a few minutes.",
+  provider_error:
+    "The AI provider returned an error while processing this request. Please try again shortly.",
   unknown: "I hit an unexpected error while processing this request.",
 };
+
+export const REQUEST_TOO_LARGE_MESSAGE =
+  "That message or attachment is too large for the assistant to process. Please send a smaller file or split it into several messages.";
+
+const REQUEST_TOO_LARGE_RE =
+  /request body is too large|payload too large|request entity too large/i;
+
+export const isRequestTooLarge = (value: {
+  status?: number;
+  message?: string;
+}): boolean =>
+  value.status === 413 || REQUEST_TOO_LARGE_RE.test(value.message ?? "");
+
+/** Customer-safe fallback text for a known category, or undefined. */
+export const categoryMessage = (category: unknown): string | undefined =>
+  isCategory(category) ? CATEGORY_MESSAGES[category] : undefined;
 
 /**
  * User-facing Discord message for a runtime failure. Never the bare generic
@@ -168,6 +209,7 @@ export const friendlyRuntimeErrorMessage = (
   // Kimi returns 401 for expired keys AND lapsed memberships alike.
   if (
     error instanceof OpenClawRuntimeError &&
+    !category.startsWith("provider_") &&
     (error.status === 401 || error.status === 402)
   ) {
     return (
@@ -175,6 +217,14 @@ export const friendlyRuntimeErrorMessage = (
       "The workspace admin can fix this by renewing the plan or updating the key in erxes. " +
       `(ref ${referenceId})`
     );
+  }
+
+  if (
+    error instanceof OpenClawRuntimeError &&
+    (category === "invalid_request" || category === "unknown") &&
+    isRequestTooLarge({ status: error.status, message: error.message })
+  ) {
+    return `${REQUEST_TOO_LARGE_MESSAGE} (ref ${referenceId})`;
   }
 
   let message = CATEGORY_MESSAGES[category];

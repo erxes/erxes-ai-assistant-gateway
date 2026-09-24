@@ -17,8 +17,11 @@ import {
 import {
   buildReferenceId,
   categorizeError,
+  categoryMessage,
   friendlyRuntimeErrorMessage,
+  isRequestTooLarge,
   OpenClawRuntimeError,
+  REQUEST_TOO_LARGE_MESSAGE,
 } from "../openclaw/errors.js";
 
 type AskInput = Parameters<typeof askOpenClawAssistant>[0];
@@ -105,10 +108,13 @@ const STAGE_MESSAGES: Record<string, string> = {
   verifying: "Verifying the result…",
 };
 
+export const GENERIC_JOB_FAILURE_MESSAGE =
+  "The operation failed before completing. Please retry; if it keeps failing, contact the workspace admin.";
+
 /**
  * Turn a failed runtime job into a useful Discord message. Prefers the
- * runtime's own safeMessage, then its error category, and only then a raw
- * error summary — never a generic "could not respond".
+ * runtime's own safeMessage, then its error category, then a generic
+ * customer-safe message. The raw error is never shown; it stays in the logs.
  */
 export const describeJobFailure = (status: {
   error?: string;
@@ -133,8 +139,14 @@ export const describeJobFailure = (status: {
     case "plugin_quarantined":
     case "plugin_validation_failed":
       return "A plugin involved in this operation is installed but could not be loaded, so it was kept unloaded. The assistant and other features keep working; it can be retried any time.";
-    default:
-      return `The operation failed: ${error || "unknown error"}`;
+    default: {
+      if (isRequestTooLarge({ message: error })) return REQUEST_TOO_LARGE_MESSAGE;
+      const known =
+        status.category && status.category !== "unknown"
+          ? categoryMessage(status.category)
+          : undefined;
+      return known ?? GENERIC_JOB_FAILURE_MESSAGE;
+    }
   }
 };
 
@@ -242,6 +254,19 @@ export const runDiscordAssistantJob = async (
       ...safeJobLogFields(record),
       runtimeHost: safeRuntimeHost(record.openclawUrl),
       outcome,
+      ...(outcome !== "ready"
+        ? {
+            errorCategory:
+              typeof patch.errorCategory === "string"
+                ? patch.errorCategory
+                : outcome === "timeout"
+                  ? "job_timeout"
+                  : "unknown",
+            ...(typeof patch.error === "string"
+              ? { error: patch.error.slice(0, 300) }
+              : {}),
+          }
+        : {}),
       delivered,
       durationMs: Date.now() - startedAt,
     });

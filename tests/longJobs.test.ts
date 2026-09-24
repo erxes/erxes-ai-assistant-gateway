@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   buildJobIdempotencyKey,
+  GENERIC_JOB_FAILURE_MESSAGE,
   runDiscordAssistantJob,
   type AssistantJobRecord,
   type AssistantJobStore,
@@ -179,7 +180,8 @@ test("failed job posts a failure message", async () => {
   });
 
   assert.equal(outcome, "failed");
-  assert.deepEqual(notifications, ["The operation failed: Install exploded"]);
+  assert.deepEqual(notifications, [GENERIC_JOB_FAILURE_MESSAGE]);
+  assert.doesNotMatch(notifications.join("\n"), /Install exploded/);
   assert.ok(
     updates.some(
       (u) => u.patch.status === "failed" && u.patch.error === "Install exploded",
@@ -239,6 +241,67 @@ test("job logs never include the question text or secrets", async () => {
   assert.doesNotMatch(flat, /TOKEN=abc123/);
   assert.doesNotMatch(flat, /secret-thing/);
   assert.match(flat, /assistant-1/);
+});
+
+test("failed and timed-out jobs log their error category", async () => {
+  const finished: Array<Record<string, unknown>> = [];
+  const logger = {
+    info: (msg: string, meta?: Record<string, unknown>) => {
+      if (msg === "Discord assistant job finished" && meta) finished.push(meta);
+    },
+    error: () => undefined,
+  } as any;
+
+  await runDiscordAssistantJob({
+    record,
+    ask: askInput,
+    store: createMemoryStore().store,
+    ack: async () => undefined,
+    notify: async () => undefined,
+    startJob: async () => ({ id: "job-1", status: "running" as const }),
+    getJob: async () => ({
+      id: "job-1",
+      status: "failed" as const,
+      error: "Kimi concurrent request limit",
+      category: "provider_busy",
+    }),
+    logger,
+    pollIntervalMs: 1,
+    timeoutMs: 1_000,
+  });
+  await runDiscordAssistantJob({
+    record: { ...record, idempotencyKey: "assistant-1:install:message-2" },
+    ask: askInput,
+    store: createMemoryStore().store,
+    ack: async () => undefined,
+    notify: async () => undefined,
+    startJob: async () => ({ id: "job-2", status: "running" as const }),
+    getJob: async () => ({ id: "job-2", status: "running" as const }),
+    logger,
+    pollIntervalMs: 1,
+    timeoutMs: 20,
+  });
+  await runDiscordAssistantJob({
+    record: { ...record, idempotencyKey: "assistant-1:install:message-3" },
+    ask: askInput,
+    store: createMemoryStore().store,
+    ack: async () => undefined,
+    notify: async () => undefined,
+    startJob: async () => ({ id: "job-3", status: "running" as const }),
+    getJob: async () => ({ id: "job-3", status: "ready" as const, answer: "ok" }),
+    logger,
+    pollIntervalMs: 1,
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(finished.length, 3);
+  assert.equal(finished[0]!.outcome, "failed");
+  assert.equal(finished[0]!.errorCategory, "provider_busy");
+  assert.equal(finished[0]!.error, "Kimi concurrent request limit");
+  assert.equal(finished[1]!.outcome, "timeout");
+  assert.equal(finished[1]!.errorCategory, "job_timeout");
+  assert.equal(finished[2]!.outcome, "ready");
+  assert.equal("errorCategory" in finished[2]!, false);
 });
 
 const createJobMessageFixture = (overrides: Record<string, unknown> = {}) => {
