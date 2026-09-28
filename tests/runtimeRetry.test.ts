@@ -4,6 +4,9 @@ import {
   withRuntimeRetry,
   shouldRetryRuntimeError,
   RUNTIME_RETRY_SCHEDULE_MS,
+  UNREACHABLE_FIRST_RETRY_MS,
+  UNREACHABLE_POLL_MS,
+  UNREACHABLE_PATIENCE_MS,
 } from "../src/openclaw/client.js";
 import { OpenClawRuntimeError } from "../src/openclaw/errors.js";
 
@@ -151,4 +154,32 @@ test("schedule totals enough patience to cover a pod restart", () => {
     total >= 120_000,
     `schedule sums to ${total}ms — must cover a 60-120s deployer-initiated pod restart`,
   );
+});
+
+test("an unreachable (sleeping) runtime is polled every 10 s, so a woken pod answers within 10 s of ready", async () => {
+  const delays: number[] = [];
+  let calls = 0;
+  const result = await withRuntimeRetry(
+    async () => {
+      calls += 1;
+      if (calls < 7) throw runtimeError(503, "runtime_unreachable");
+      return "answered";
+    },
+    { sleep: async ms => { delays.push(ms); } },
+  );
+  assert.equal(result, "answered");
+  assert.deepEqual(delays, [UNREACHABLE_FIRST_RETRY_MS, 10_000, 10_000, 10_000, 10_000, 10_000]);
+  assert.equal(UNREACHABLE_POLL_MS, 10_000);
+});
+
+test("a runtime that never comes back gives up after the 5 min patience", async () => {
+  let waited = 0;
+  await assert.rejects(
+    withRuntimeRetry(
+      async () => { throw runtimeError(503, "runtime_unreachable"); },
+      { sleep: async ms => { waited += ms; } },
+    ),
+    (error: unknown) => error instanceof OpenClawRuntimeError && error.category === "runtime_unreachable",
+  );
+  assert.ok(waited <= UNREACHABLE_PATIENCE_MS && waited >= UNREACHABLE_PATIENCE_MS - UNREACHABLE_POLL_MS, `waited ${waited}`);
 });

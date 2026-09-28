@@ -85,6 +85,15 @@ export const RUNTIME_RETRY_SCHEDULE_MS = [
   5_000, 15_000, 30_000, 60_000, 90_000,
 ];
 
+// An unreachable runtime is usually a sleeping assistant that was just asked
+// to wake (~35-55 s to serve). On the backoff above the retry after a wake
+// landed at +110 s, a minute after the pod was ready; polling every 10 s
+// answers within 10 s of it. Patience is 5 min so a queued wake (the deployer
+// admits at most 4 per node at once) still delivers.
+export const UNREACHABLE_FIRST_RETRY_MS = 5_000;
+export const UNREACHABLE_POLL_MS = 10_000;
+export const UNREACHABLE_PATIENCE_MS = 300_000;
+
 const runtimeSecretHeaders = (): Record<string, string> =>
   env.OPENCLAW_SHARED_SECRET
     ? { "x-erxes-ai-assistant-secret": env.OPENCLAW_SHARED_SECRET }
@@ -141,14 +150,27 @@ export const withRuntimeRetry = async <T>(
     options.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
+  let unreachableWaitedMs = 0;
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      const delayMs = RUNTIME_RETRY_SCHEDULE_MS[attempt];
-
-      if (delayMs === undefined || !shouldRetryRuntimeError(error, attempt)) {
-        throw error;
+      let delayMs: number | undefined;
+      if (
+        error instanceof OpenClawRuntimeError &&
+        error.category === "runtime_unreachable"
+      ) {
+        delayMs =
+          unreachableWaitedMs === 0
+            ? UNREACHABLE_FIRST_RETRY_MS
+            : UNREACHABLE_POLL_MS;
+        if (unreachableWaitedMs + delayMs > UNREACHABLE_PATIENCE_MS) throw error;
+        unreachableWaitedMs += delayMs;
+      } else {
+        delayMs = RUNTIME_RETRY_SCHEDULE_MS[attempt];
+        if (delayMs === undefined || !shouldRetryRuntimeError(error, attempt)) {
+          throw error;
+        }
       }
 
       try {
