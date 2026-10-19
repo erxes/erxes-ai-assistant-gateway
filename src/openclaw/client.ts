@@ -62,6 +62,13 @@ export type AskAssistantInput = {
       size: number;
       url: string;
     }>;
+    // Files pasted into the question as text, sent so the adapter can save
+    // the original on disk.
+    inlinedFiles?: Array<{
+      filename: string;
+      size: number;
+      url: string;
+    }>;
   };
 };
 

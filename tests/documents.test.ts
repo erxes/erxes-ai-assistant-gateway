@@ -228,3 +228,26 @@ test("a file sent without a message gets an explicit ask instead of the bare con
     assert.match(question, /Build the whole system now\.$/);
   });
 });
+
+test("an inlined document's Discord link goes to OpenClaw so the adapter can save the original", async () => {
+  await withDocxFetch(async () => {
+    const asked: any[] = [];
+    const deps = (runtimeKind?: string) => ({
+      ...gatewayDeps(() => undefined),
+      findBinding: async () =>
+        ({ assistantId: "a1", tenantId: "t1", guildId: "g1", channelId: "c1", enabled: true, responseMode: "all_messages", runtimeKind }) as any,
+      askAssistant: async (input: any) => {
+        asked.push(input);
+        return "ok";
+      },
+    });
+    await handleDiscordMessage(docxAttachmentMessage("what is in here").message, deps());
+    await handleDiscordMessage(docxAttachmentMessage("what is in here").message, deps("hermes"));
+    assert.deepEqual(asked[0].discord.inlinedFiles, [
+      { filename: "brief.docx", size: 100, url: "https://cdn.discordapp.com/attachments/1/2/brief.docx" },
+    ]);
+    assert.deepEqual(asked[0].discord.attachments, []);
+    assert.match(asked[0].question, /Build the whole system now\./);
+    assert.equal("inlinedFiles" in asked[1].discord, false);
+  });
+});

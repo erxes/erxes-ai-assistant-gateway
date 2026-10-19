@@ -38,8 +38,10 @@ import {
 
 import {
   attachmentRejectionMessage,
+  isAllowedDiscordAttachmentUrl,
   MAX_ATTACHMENTS,
   normalizeDiscordAttachments,
+  sanitizeAttachmentFilename,
   skippedAttachmentsNote,
   type RawDiscordAttachment,
 } from "./attachments.js";
@@ -416,6 +418,18 @@ export const handleDiscordMessage = async (
   const { supported: attachments, skipped } = normalizeDiscordAttachments(
     rawAttachments.filter((a) => !isInlined(a)),
   );
+  // The OpenClaw adapter saves these under media/inbound so the model opens
+  // the real file instead of retyping the pasted text: from the text alone it
+  // dropped two payments from a 111-row bank statement (tsoomooai2,
+  // 2026-10-19). Older adapters ignore the field.
+  const inlinedFiles = inlineRaw
+    .slice(0, MAX_ATTACHMENTS)
+    .filter((a) => isAllowedDiscordAttachmentUrl(a.url))
+    .map((a) => ({
+      filename: sanitizeAttachmentFilename(a.filename),
+      size: Number(a.size) || 0,
+      url: a.url as string,
+    }));
   let question = message.content.trim();
 
   if (inlineRaw.length > 0) {
@@ -538,6 +552,9 @@ export const handleDiscordMessage = async (
         : undefined,
       conversationId,
       attachments,
+      ...((binding.runtimeKind || "openclaw") === "openclaw" && inlinedFiles.length > 0
+        ? { inlinedFiles }
+        : {}),
     },
   };
 
